@@ -1,0 +1,2666 @@
+head	1.10;
+access;
+symbols;
+locks
+	o2-gray:1.10; strict;
+comment	@ * @;
+
+
+1.10
+date	2016.04.10.23.09.34;	author o2-gray;	state Exp;
+branches;
+next	1.9;
+
+1.9
+date	2016.04.10.03.01.56;	author o2-gray;	state Exp;
+branches;
+next	1.8;
+
+1.8
+date	2016.04.09.03.17.39;	author o2-gray;	state Exp;
+branches;
+next	1.7;
+
+1.7
+date	2016.04.08.03.17.53;	author o2-gray;	state Exp;
+branches;
+next	1.6;
+
+1.6
+date	2016.04.06.03.17.56;	author o2-gray;	state Exp;
+branches;
+next	1.5;
+
+1.5
+date	2016.04.03.03.02.23;	author o2-gray;	state Exp;
+branches;
+next	1.4;
+
+1.4
+date	2016.04.02.03.56.43;	author o2-gray;	state Exp;
+branches;
+next	1.3;
+
+1.3
+date	2016.04.01.03.06.53;	author o2-gray;	state Exp;
+branches;
+next	1.2;
+
+1.2
+date	2016.03.31.03.36.27;	author o2-gray;	state Exp;
+branches;
+next	1.1;
+
+1.1
+date	2016.03.30.04.00.10;	author o2-gray;	state Exp;
+branches;
+next	;
+
+
+desc
+@Started the framework and trying to get structs to work with memory correctly.
+@
+
+
+1.10
+log
+@After 40+ hours... Done!
+@
+text
+@#include "functs.h"
+
+int semKey = 8675309, semId;//For clock
+// int semKey2 = 8008135, semId2;//For printing resources in process.c
+int semKeyR = 3333333, semIdR;//For Removing resources in process.c
+int semKeyCond = 90210, semIdCond;//For processes requesting resources
+int key = 4444444;
+int key2 = 5555555;
+int key3 = 6666666;
+int shmidVal;
+int shmidVal2;
+int shmidVal3;
+
+int main(int argc, char * argv[]){
+/*******************************************************************************************
+Initialize vars.  totalNumAllowed, numAllowedConcurrently, & runTime can be modified safely
+*******************************************************************************************/
+int numAllowedConcurrently = 5;//Number of processes allowed to run at the same time
+int totalNumAllowed = 15;//Number of processes allowing to be created
+double runTime = 10;//Time the program can run until in stops (seconds)
+
+int bv[1] = {0};//bv = bitVector. keep track of PCBs taken
+int numberCompleted = 0;//Keep track of number of processes complete for calculations at the end
+int processId = 0, processCounter = 0, processToRunId = -1, processRequestId = -1;
+pid_t procPid, waitingPid;
+int status;
+double timePassed = 0, totalTime = 0, prevTotalTime = 0, startTime = 0;
+double randTime;//Timing for when to generate next process
+srand(time(NULL));
+int p, r;//for loop vars
+
+char tempProcessId[sizeof(int)];//For sending processId through execl 
+char tempShmidVal[sizeof(int)];//For sending shmidVal through execl 
+char tempShmidVal2[sizeof(int)];//For sending shmidVal2 through execl tempPriority
+char tempShmidVal3[sizeof(int)];//For sending shmidVal2 through execl tempPriority
+
+initSigHandler();//Initialize signal handler
+
+struct PCB *processBlock;
+struct timing *timer;
+struct resourceTable *resource;
+
+//Create & Attach to Shared Memory: shared memory segment specified by shmidVal to the address space
+if((shmidVal = shmget(key, sizeof(struct PCB), IPC_CREAT | 0666)) < 0){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmget");
+	exit(EXIT_FAILURE);
+}
+if((processBlock = (struct PCB*)shmat(shmidVal, 0, 0)) == (void *)-1){ //Returns void*
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmat");
+	exit(EXIT_FAILURE);
+}
+if((shmidVal2 = shmget(key2, sizeof(struct timing), IPC_CREAT | 0666)) < 0){
+	fprintf(stderr,"%s %d ",__FILE__, __LINE__);
+	perror("shmget");
+	exit(EXIT_FAILURE);
+}
+if((timer = (struct timing*)shmat(shmidVal2, 0, 0)) == (void *)-1){ //Returns void*
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmat");
+	exit(EXIT_FAILURE);
+}
+if((shmidVal3 = shmget(key3, sizeof(struct resourceTable), IPC_CREAT | 0666)) < 0){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmget");
+	exit(EXIT_FAILURE);
+}
+if((resource = (struct resourceTable*)shmat(shmidVal3, 0, 0)) == (void *)-1){ //Returns void*
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmat");
+	exit(EXIT_FAILURE);
+}
+
+//Create Semaphores
+if((semId = semget(semKey,1,IPC_CREAT | 0666)) == -1){//For advancing clock
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror(" semget");
+	exit(EXIT_FAILURE);
+}
+semctl(semId, 0, SETVAL, 1);//Initialize binary semaphore for clock, unlocked from start
+if((semIdCond = semget(semKeyCond,1,IPC_CREAT | 0666)) == -1){//For processes requesting resources
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror(" semget");
+	exit(EXIT_FAILURE);
+}
+semctl(semIdCond, 0, SETVAL, 1);//Initialize binary semaphore for requests, unlocked from start
+if((semIdR = semget(semKeyR,1,IPC_CREAT | 0666)) == -1){//For removing resources in process.c
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror(" semget");
+	exit(EXIT_FAILURE);
+}
+semctl(semIdR, 0, SETVAL, 1);//Initialize binary semaphore
+
+/******************************************************
+Initialize all resources' values
+******************************************************/
+for(r = 0; r < 20; r++){
+	resource->type[r] = r;//The total amount of this resource
+	resource->total[r] = rand() % 10 + 1;//The total amount of this resource [1-10]
+	resource->available[r] = resource->total[r];//The total amount available of this resource
+	for(p = 0; p < 18; p++){
+		processBlock->allocated[p][r] = 0;//Amount of resource r process p is allocated
+		processBlock->need[p][r] = 0;//Amount of resource r process p is wanting so can run
+		processBlock->release[p][r] = 0;//Amount of resource r process p has released
+	}
+} 
+
+//Processes waiting for resources empty at first
+for(r = 0; r < 20; r++){
+	for(p = 0; p < 18; p++){
+		resource->blocked[r][p] = -1;//Queues empty
+		processBlock->maxClaim[p][r] = -1;//No claims made yet
+	}
+	resource->blockedTail[r] = -1;//Nothing in Queues yet
+	resource->shared[r] = false;//Nothing shared yet
+}
+
+fprintf(stdout,"********************************Shared resources***********************************\n");
+//15-25% of these 20 resources will be shared.  So 3-5 of them.
+int amountShared = rand() % 3 + 3;// [3-5]
+if(amountShared == 3){
+	int processShared1 = rand() % 20; int processShared2 = rand() % 20; int processShared3 = rand() % 20;
+	// fprintf(stdout, "All 3: %d, %d, %d\n",processShared1, processShared2, processShared3);
+	while(true){
+		if(processShared1 != processShared2 != processShared3){
+			// fprintf(stdout, "All 3 different: %d, %d, %d\n",processShared1, processShared2, processShared3);
+			for(r = 0; r < 20; r++){
+				if(r == processShared1 || r == processShared2 || r == processShared3){
+					resource->shared[r] = true;
+				}
+			}
+			break;
+		}
+		processShared1 = rand() % 20; processShared2 = rand() % 20; processShared3 = rand() % 20;
+		// processShared1 = rand() % 20; processShared2 = rand() % 20; processShared3 = rand() % 20;
+	}
+}else if(amountShared == 4){
+	int processShared1 = rand() % 20; int processShared2 = rand() % 20;
+	int processShared3 = rand() % 20; int processShared4 = rand() % 20;
+	// fprintf(stdout, "All 4: %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4);
+	while(true){
+		if(processShared1 != processShared2 != processShared3 != processShared4){
+			// fprintf(stdout, "All 4 different: %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4);
+			for(r = 0; r < 20; r++){
+				if(r == processShared1 || r == processShared2 || r == processShared3 || r == processShared4){
+					resource->shared[r] = true;
+				}
+			}
+			break;
+		}
+		processShared1 = rand() % 20; processShared2 = rand() % 20;
+		processShared3 = rand() % 20; processShared4 = rand() % 20;
+	}
+} else if(amountShared == 5){
+	int processShared1 = rand() % 20; int processShared2 = rand() % 20; int processShared3 = rand() % 20;
+	int processShared4 = rand() % 20; int processShared5 = rand() % 20;
+	// fprintf(stdout, "All 5: %d, %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4, processShared5);
+	while(true){
+		if(processShared1 != processShared2 != processShared3 != processShared4 != processShared5){
+			// fprintf(stdout, "All 5 different: %d, %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4, processShared5);
+			for(r = 0; r < 20; r++){
+				if(r == processShared1 || r == processShared2 || r == processShared3 || r == processShared4|| r == processShared5){
+					resource->shared[r] = true;
+					// fprintf(stdout,"Resource[%d] shared: %d\n",r,resource->shared[r]);
+				}
+			}
+			break;
+		}
+		processShared1 = rand() % 20; processShared2 = rand() % 20; processShared3 = rand() % 20;
+		processShared4 = rand() % 20; processShared5 = rand() % 20;
+	}
+}
+for(r = 0; r < 20; r++){
+	if(resource->shared[r] == 1){
+		fprintf(stdout,"Resource %d, ",r);
+	}
+}
+fprintf(stdout,"\n\n");
+
+fprintf(stdout,"********************************Total Resources Starting***********************************\n");
+for(r = 0; r < 20; r++){//Print resource totals
+	fprintf(stdout,"Res %d = %d, ", r, resource->total[r]);
+}
+fprintf(stdout,"\n\n");
+fprintf(stdout,"This program will run and display each process initial needs upon creation,\n");
+fprintf(stdout,"whether the process is terminating or not, the resources it deallocates or \n");
+fprintf(stdout,"is allocated to it, and an update of the available resources whenever a process\n");
+fprintf(stdout,"is allocated a resource or deallocates a resource.  The screen may go by fast,\n");
+fprintf(stdout,"but I wanted to display some visual information for you to follow so you can see it works.\n");
+fprintf(stdout,"NOTE: There are sometimes 2 shared resources rather than > 3 (see above), keyword sometimes.\n");
+fprintf(stdout,"Mark said we didn't have to do the 15-25% resources shared (like I did), but already had it\n");
+fprintf(stdout,"implemented and I didn't want to waste the little time I have fixing it.\n");
+fprintf(stdout,"PRESS ANY KEY TO CONTINUE\n");
+getchar();
+
+//Initialize clock items
+timer->clockSecs = 0;  timer->clockNanos = 0;
+
+processBlock->processDone = -1;//Hold Id of process ending
+processBlock->processRequesting = -1;//Hold Id of process requesting
+randTime = genRandomDouble();//Timing for when to generate next process
+
+int t = 0;
+// numAllowedConcurrently = 5;//Number of processes allowed to run at the same time
+// totalNumAllowed = 15;//Number of processes allowing to be created
+runTime = 18;
+while(true){
+	
+	if(((totalTime - prevTotalTime) > randTime) && processCounter < numAllowedConcurrently && processId < totalNumAllowed){
+		// fprintf(stdout,"processCounter %d, processId %d\n", processCounter, processId);
+		// fprintf(stdout,"AFTER time: %.9f, prevTotalTime: %.9f, time passed: %.9f\n",totalTime, prevTotalTime, totalTime - prevTotalTime);
+		prevTotalTime = totalTime;//Set so we can use to determine when next process can be created
+		totalTime = getTotalTime(&timer->clockSecs, &timer->clockNanos, &totalTime);
+		
+		if(bvFull(bv, totalNumAllowed) == 1){//Make sure bitVector/Process table not full. If is, don't generate new process
+			fprintf(stdout,"BV full.\n", processId);
+			continue;//If full, don't create newe process
+		}
+		if(member(bv, processId) == 0){//Insert process into bitVector.  Stop creating processes once bitVector full
+			set(bv, processId);//Put in bitvector
+		}else{
+			fprintf(stdout,"Couldn't insert %d in bv.\n", processId);
+		}
+		
+		if((procPid = fork()) == 0){//is child, new process receives a copy of the address space of the parent
+			// fprintf(stdout,"New child %d / %d, time: %.9f\n",processId, getpid(),prevTotalTime);
+			processBlock->running[processId] = 1;
+			processBlock->requesting[processId] = -1;
+			processBlock->pid[processId] = getpid();
+			processBlock->cpuTimeUsed[processId] = 0;//total CPU time used
+			processBlock->totalSystemTime[processId] = totalTime;//total CPU time used
+			processBlock->turnAround[processId] = 0;
+			processBlock->idle[processId] = 0;
+			processBlock->idleTotal[processId] = 0;
+			
+			sprintf(tempProcessId,"%d", processId);//For passing the ID through exec 
+			sprintf(tempShmidVal,"%d", shmidVal);//For passing the shared mem ID through exec 
+			sprintf(tempShmidVal2,"%d", shmidVal2);//For passing the shared mem ID through exec 
+			sprintf(tempShmidVal3,"%d", shmidVal3);//For passing the shared mem ID through exec 
+ 
+			execl("./process",tempProcessId,tempShmidVal,tempShmidVal2,tempShmidVal3,NULL);//Execute executible
+			perror("Child failed to execl ");
+			exit(EXIT_FAILURE);
+		}else if(procPid < 0){//fork() fails with -1
+			fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			perror("fork() error");
+			exit(EXIT_FAILURE);
+		}
+		randTime = genRandomDouble();//Create new random time to wait before making new process
+		processId++;
+		processCounter++;
+	}
+
+	if(processBlock->processDone != -1){//A process is done, remove from bitVector
+		waitRemove();
+		numberCompleted++;
+		clearBit(bv, processBlock->processDone);
+		waitingPid = waitpid(processBlock->pid[processBlock->processDone], &status, WUNTRACED);
+		if(waitingPid == -1){//Wait for this process to end before decr processCounter and creating new process
+			fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			perror("waitpid");
+			exit(EXIT_FAILURE);
+		}
+		fprintf(stdout,"Process %d terminating...\n", processBlock->processDone);
+		processBlock->processDone = -1;//Wait til next process done
+		processCounter--;
+		signalRemove();
+	}
+	
+	processRequestId = processBlock->processRequesting;
+	if(allQueuesEmpty(20, 18, resource->blocked) == 0 || processBlock->processRequesting != -1){//If processes in blocked queue waiting for resources
+		int pid = deadlock(processBlock, resource, processRequestId);
+		// fprintf(stdout,"DEADLOCK ALG returned %d, processBlock->processRequesting = %d, processBlock->running[%d] = %d\n", pid, processBlock->processRequesting, pid, processBlock->running[pid]);
+		if(processBlock->processRequesting == -1 && pid != -1 && processBlock->running[pid] == 1){//If tried running a queued process && was allocated to
+			processBlock->idle[pid] = getTotalTime(&timer->clockSecs, &timer->clockNanos, &totalTime) - processBlock->idle[pid];//Curr time - time blocked
+			processBlock->idleTotal[pid] = processBlock->idleTotal[pid] + processBlock->idle[pid];
+			processBlock->idle[pid] = 0;
+		}
+		pid = -1;
+		processBlock->processRequesting = -1;//Allow another process to be added, this is condition for process semaphore
+	}
+	
+	advanceClock(&timer->clockSecs, &timer->clockNanos);//advance clock to simulate overhead
+	totalTime = getTotalTime(&timer->clockSecs, &timer->clockNanos, &totalTime);
+	
+	if(t > 500000 && countArray(processBlock->running) == 0){//So get some feedback if all processes done and oss time not up
+		fprintf(stdout,"OSS running...\n", totalTime - prevTotalTime, randTime, processBlock->processRequesting);
+		t = 0;
+	}
+	t++;
+/***************************************************************************************************************
+If time is up and no processes are running.  A process may be in a Queue still and we may not get a "Deadlocked"
+warning and termination if the time runs out before we try to allocate to that process to get the error
+****************************************************************************************************************/
+	if(totalTime > runTime && countArray(processBlock->running) == 0){
+		fprintf(stdout,"Time is up!\n");
+		break;
+	}
+}
+
+sleep(1);//To ensure final/remaining values can be updated by running processes before calculations
+/************************************************************************************************************
+Statistics: Average CPU time, Average turnaround time, Average waiting time, Average Idle times for processes
+*************************************************************************************************************/
+double total = 0;
+int numProc = 0;
+fprintf(stdout,"\n***************************** CPU Utilization Times ********************************\n");
+fprintf(stdout,"Total CPU Time	  Idle Time    CPU Time Used	 Cummulative CPU Time Used\n");
+for(p = 0; p < 18; p++){
+	if(processBlock->cpuTimeUsed[p] == 0){
+		numProc = p;
+		break;
+	}
+	if(processBlock->idleTotal[p] > 0){
+		fprintf(stdout,"%d: %.9f - %.9f = %.9f	  ",p,processBlock->cpuTimeUsed[p] + processBlock->idleTotal[p], processBlock->idleTotal[p], processBlock->cpuTimeUsed[p]);
+	}else{
+		fprintf(stdout,"%d: %.9f			    		  ",p,processBlock->cpuTimeUsed[p]);
+	}
+	total += processBlock->cpuTimeUsed[p];//Idle time already subtracted for cpuTimeUsed
+	fprintf(stdout,"total: %.9f\n",total);
+}
+fprintf(stdout,"\nCummulative CPU Time Used between All processes: %.9f\n",total);
+fprintf(stdout,"Average CPU Time Used: %.9f/%d = %.9f\n", total, numProc, (total/(double)numProc));
+fprintf(stdout,"CPU ran for: %.9fs\n",totalTime);
+/************************************************************************************************************
+CPU idle time left out.  Unlike last assignment, a process or oss will always be running since all are running
+concurrently.  We aren't waiting for processes/oss to finish before oss/another process can run, so the CPU is
+always running.
+*************************************************************************************************************/
+fprintf(stdout,"\n***************************** Idle Times **********************************\n");
+total = 0;
+for(p = 0; p < numProc; p++){
+	if(processBlock->idleTotal[p] > 0){
+		fprintf(stdout,"%d: %.9f	  ", p, processBlock->idleTotal[p]);
+		total = total + processBlock->idleTotal[p];
+	}
+}
+if(total > 0){
+	fprintf(stdout,"\nAverage idle time: %.9f/%d = %.9f\n", total, numProc, total/(double)numProc);
+}else{
+	fprintf(stdout,"No processes were Blocked during this execution\n");
+}
+
+fprintf(stdout,"\n***************************** Turnaround Times **********************************\n");
+total = 0;
+for(p = 0; p < numProc; p++){
+	fprintf(stdout,"%d: %.9f	  ", p, processBlock->turnAround[p]);
+	total = total + processBlock->turnAround[p];
+	if(p % 3 == 0){
+		fprintf(stdout,"\n");
+	}
+}
+fprintf(stdout,"\nAverage turnaround time: %.9f/%d = %.9f\n", total, numProc, total/(double)numProc);
+
+fprintf(stdout,"\n***************************** Waiting Times ********************************\n");
+total = 0;
+//Waiting time of a process = finish time of that process - execution time - arrival time = turnAround - CPU time used
+for(p = 0; p < numProc; p++){//Waiting time = endTime - creation time - turnaround
+	fprintf(stdout,"%d: %.9f	  ",p,processBlock->totalSystemTime[p] - processBlock->turnAround[p]);
+	total = total + processBlock->totalSystemTime[p] - processBlock->turnAround[p];
+	if(p % 3 == 0){
+		fprintf(stdout,"\n");
+	}
+}
+fprintf(stdout,"\nAverage Waiting time: %.9f/%d = %.9f\n",total, numProc, total/(double)numProc);
+/************************************************************************************************************
+No scheduling in this project, so waiting time is relatively short since upon creation, the process will
+arrive in a short period of time and start executing immediately
+*************************************************************************************************************/
+fprintf(stdout,"\n***************************** Throughput ********************************\n");
+fprintf(stdout,"Number of Processes Completed = %d, Total Time %.9f%\n", numProc, totalTime);
+fprintf(stdout,"Throughput: %d/%.9f = %.9f\n",numProc, totalTime, totalTime/(double)numProc);
+fprintf(stdout,"A process is created at a rate approximately every %.9fs\n\n", totalTime/(double)numProc);
+
+fprintf(stdout,"\n***************************** Resources Released (Class: Amount) ********************************\n");
+for(p = 0; p < numProc; p++){
+	fprintf(stdout,"Process %d released: ", p);
+	for(r = 0; r < 20; r++){
+		if(processBlock->release[p][r] > 0){
+			fprintf(stdout,"%d: %d, ", r, processBlock->release[p][r]);
+		}
+	}
+	fprintf(stdout,"\n");
+}
+
+if(procPid != 0){//child's pid returned to parent
+	// printf("Master ID %d\n",getpid());
+   bool childrenAlive = false;
+   for(p = 0; p < 18; p++){
+		if(processBlock->running[p] == 1){//If > 0 processes running, not deadlocked
+			childrenAlive = true;
+			break;
+		}
+	}
+	if(allQueuesEmpty(20, 18, resource->blocked) == 0){//If > 0, processes running, not deadlocked
+		childrenAlive = true;
+	}
+   if(childrenAlive){//If processes still alive, kill them
+		fprintf(stdout,"Time is up, but children remain and must be eradicated...\n");
+		fprintf(stdout,"     _.--''--._\n");
+		fprintf(stdout,"    /  _    _  \\ \n");
+		fprintf(stdout," _  ( (_\\  /_) )  _\n");
+		fprintf(stdout,"{ \\._\\   /\\   /_./ }\n");
+		fprintf(stdout,"/_'=-.}______{.-='_\\ \n");
+		fprintf(stdout," _  _.=('''')=._  _\n");
+		fprintf(stdout,"(_''_.-'`~~`'-._''_)\n");
+		fprintf(stdout," {_'            '_}\n");
+		fprintf(stderr,"\n");
+		if(allQueuesEmpty(20, 18, resource->blocked) == 0){
+			fprintf(stderr,"Processes still exist in a blocked Queue\n");
+			printQueue(20, 18, resource->blocked);
+		}
+		fprintf(stdout,"Still running: ");
+		for(p = 0; p < 18; p++){
+			if(processBlock->running[p] == 1){//If > 0 processes running, not deadlocked
+				fprintf(stdout,"%d, ", p);
+			}
+		}
+		fprintf(stdout,"\n");
+		fprintf(stdout,"Not running: ");
+		for(p = 0; p < 18; p++){
+			if(processBlock->running[p] == 0){//If > 0 processes running, not deadlocked
+				fprintf(stdout,"%d, ", p);
+			}
+		}
+		fprintf(stdout,"\n");
+		kill(-getpid(),SIGINT);
+	}
+}
+
+//Detach from shared mem and Remove shared mem when all processes done
+if(shmdt(processBlock) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+        perror("shmdt");
+        exit(EXIT_FAILURE);
+}
+if (shmctl(shmidVal,IPC_RMID,NULL) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmctl");
+	exit(EXIT_FAILURE);
+}
+if(shmdt(timer) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+        perror("shmdt");
+        exit(EXIT_FAILURE);
+}
+if (shmctl(shmidVal2,IPC_RMID,NULL) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmctl");
+	exit(EXIT_FAILURE);
+}
+if(shmdt(resource) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmdt");
+	exit(EXIT_FAILURE);
+}
+if (shmctl(shmidVal3,IPC_RMID,NULL) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("shmctl");
+	exit(EXIT_FAILURE);
+}
+
+//Delete Semaphore.  IPC_RMID Remove the specified semaphore set
+if(semctl(semId, 0, IPC_RMID) == -1){//For clock
+    fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("semctl");
+	exit(EXIT_FAILURE);
+}
+if(semctl(semIdCond, 0, IPC_RMID) == -1){//For processes requesting resources
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("semctl");
+	exit(EXIT_FAILURE);
+}
+if(semctl(semIdR, 0, IPC_RMID) == -1){//For clock
+    fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("semctl");
+	exit(EXIT_FAILURE);
+}
+
+fprintf(stdout,"Master process is complete\n");
+return 0;
+}//END main
+
+void sigHandler(int mysignal){
+	// printf("MASTER process id %d  signal %d\n", getpid(),mysignal);
+	struct PCB *processBlock;
+	struct timing *timer;
+	struct resourceTable *resource;
+	
+	//Attach to shared memory
+	if((processBlock = (struct PCB *)shmat(shmidVal, (void *)0, 0)) == (void *)-1){ //Returns void*
+		fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+		perror("shmat");
+		exit(EXIT_FAILURE);
+	}
+	if((timer = (struct timing *)shmat(shmidVal2, 0, 0)) == (void *)-1){ //Returns void*
+		fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+		perror("shmat");
+		exit(EXIT_FAILURE);
+	}
+	if((resource = (struct resourceTable *)shmat(shmidVal3, 0, 0)) == (void *)-1){ //Returns void*
+		fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+		perror("shmat");
+		exit(EXIT_FAILURE);
+	}
+
+	switch(mysignal){
+		case SIGINT:
+			fprintf(stderr,"The Parent killed all of the children because something interrupted it (probably the children)!\n");
+			// kill(-getpid(),SIGTERM);
+			//Detach & Remove shared mem when all processes done
+			if(shmdt(processBlock) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			    perror("shmdt");
+ 			    exit(EXIT_FAILURE);
+			}
+			if (shmctl(shmidVal,IPC_RMID,NULL) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("shmctl");
+				exit(EXIT_FAILURE);
+			}
+			if(shmdt(timer) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			        perror("shmdt");
+ 			       exit(EXIT_FAILURE);
+			}
+			if (shmctl(shmidVal2,IPC_RMID,NULL) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("shmctl");
+				exit(EXIT_FAILURE);
+			}
+			if(shmdt(resource) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			        perror("shmdt");
+ 			       exit(EXIT_FAILURE);
+			}
+			if (shmctl(shmidVal3,IPC_RMID,NULL) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("shmctl");
+				exit(EXIT_FAILURE);
+			}
+			
+			//Delete Semaphore.  IPC_RMID Remove the specified semaphore set
+			if(semctl(semId, 0, IPC_RMID) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("semctl");
+				exit(EXIT_FAILURE);
+			}
+			if(semctl(semIdCond, 0, IPC_RMID) == -1){
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("semctl");
+				exit(EXIT_FAILURE);
+			}
+			if(semctl(semIdR, 0, IPC_RMID) == -1){//For clock
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("semctl");
+				exit(EXIT_FAILURE);
+			}
+
+			exit(1);
+			break;
+		default:
+			printf("Default signal %d\n", mysignal);
+			break;
+	}
+	return;
+}
+
+void initSigHandler(){
+	struct sigaction signalAct;
+	signalAct.sa_handler = &sigHandler;//Setup sigHandler
+	signalAct.sa_flags = SA_RESTART|SA_SIGINFO;
+	// sigfillset(&signalAct.sa_mask);//Block all other signals
+
+	if(sigaction(SIGINT, &signalAct, NULL) == -1){
+		perror("SIGINT receipt failed");
+	}
+}
+
+int deadlock(struct PCB* processBlock, struct resourceTable* resource, int processToRunId){
+	int r, p, i;//for loop vars
+	int safe, exec = 0, processId;
+	int processNumPassed = processToRunId;
+	int resourceGiving, resAmountGiving, notRunning = 0, num = 0;
+	bool processRunning = false;
+	
+	// fprintf(stdout,"processToRunId = %d\n", processToRunId);
+	if(processNumPassed == -1 && allQueuesEmpty(20, 18, resource->blocked) == 0){//If trying a queued process && Queues not empty
+		// fprintf(stdout,"Try a blocked process from:\n", processToRunId);
+		int processQueued[20];//Array will hold all process Ids currently blocked
+		int index = 0;
+		for(r = 0; r < 20; r++){
+			processQueued[r] = -1;
+		}
+		for(r = 0; r < 20; r++){
+			if(resource->blockedTail[r] != -1){//If Queue has something in it
+				for(p = 0; p < 18; p++){//Add all processes in this queue
+					if(resource->blocked[r][p] != -1){
+						processQueued[index] = resource->blocked[r][p];
+						// fprintf(stdout,"resource->blockedTail[%d] = %d, resource->blocked[%d][0] = %d, processQueued[%d] = %d\n",r, resource->blockedTail[r], r, resource->blocked[r][0], index, processQueued[index]);
+						index++;
+					}else{
+						break;
+					}
+				}
+			}
+		}
+		if(index == 0){
+		}else if(index == 1){//If only one process Blocked
+			processToRunId = processQueued[0];
+			// fprintf(stdout,"Try running %d from blocked Queue\n", processToRunId);
+		}else{//Choose random process
+			int processIndex = rand() % index;
+			processToRunId = processQueued[processIndex];
+			// fprintf(stdout,"Try running %d from blocked Queue:\n", processToRunId);
+		}
+	}else if(processNumPassed == -1){
+		// fprintf(stdout,"NOTHING RUNNING processToRunId = %d\n", processToRunId);
+		return 1;
+	}
+	
+	if(processToRunId == -1){
+		// fprintf(stdout,"PROCESS ENDED before allocation processToRunId = %d\n", processToRunId);
+		return 1;
+	}
+	
+	// fprintf(stdout,"processToRunId = %d, requesting: %d\n", processToRunId, processBlock->requesting[processToRunId]);	
+	safe = 0;
+	p = processToRunId;
+	exec = 1;
+	if(processNumPassed != -1){//Not trying queued process
+		for(r = 0; r < 20; r++){
+			if(resource->available[r] < processBlock->need[p][r]){//Not enough resources available for this process
+				if(!inQueue(20, 18, resource->blocked, r, p)){//If process not already in queue for requesting resources
+					fprintf(stdout,"Not enough %d resources for %d to run, ", r, p);
+					addQueue(p, r, resource->blocked, &resource->blockedTail[r]);//Add to blocked queue since can't run
+					processBlock->running[p] = 0;
+					processBlock->requesting[p] = r;//Waiting on this resource to become available
+					printQueue(20, 18, resource->blocked);
+				}else{
+					// fprintf(stdout,"%d ALREADY QUEUED, running = %d\n", p, processBlock->running[p]);
+				}
+				exec = 0;
+				break;
+			}
+		}
+	}else if(processNumPassed == -1){//Trying a queued process
+		if(resource->available[processBlock->requesting[p]] < processBlock->need[p][processBlock->requesting[p]]){
+			exec = 0;//Resource not available for this process yet
+		}
+	}
+	if(exec){
+		// fprintf(stdout,"Process %d safe to allocate to!\n", p);
+		safe = 1;
+		// printNeeds(processBlock , resource, p, 0);//Print this processes Needs
+		resourceGiving = processBlock->requesting[p];//Resource to allocate
+		resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+		if(processNumPassed == -1){//Resource allocated, no longer in Queue
+			int w = selectFromQueue(resource->blocked[resourceGiving], &resource->blockedTail[resourceGiving], p);//Remove from queue
+			if(w == -1){//Process ended sometime recently
+				return 1;
+			}
+			fprintf(stdout,"Process %d REMOVED from queue\n", w);
+			printQueue(20, 18, resource->blocked);
+		}
+		// fprintf(stdout,"%d numResClasses = %d, Giving %d of res %d\n", p, numResClasses, resAmountGiving, resourceGiving);
+		processBlock->allocated[p][resourceGiving] = processBlock->allocated[p][resourceGiving] + resAmountGiving;//Allocate resource for this process
+		processBlock->need[p][resourceGiving] = processBlock->maxClaim[p][resourceGiving] - processBlock->allocated[p][resourceGiving];//Need = Max - Allocated
+		if(resource->shared[resourceGiving] == 0){//If resources isn't shared, decrement
+			resource->available[resourceGiving] = resource->available[resourceGiving] - resAmountGiving;//Update available number of resources
+			fprintf(stdout,"Process %d Allocated %d of resource %d\n", p, resAmountGiving, resourceGiving);
+		}else{
+			fprintf(stdout,"Process %d Allocated %d of Sharable resource %d\n", p, resAmountGiving, resourceGiving);
+		}
+		// printNeeds(processBlock , resource, p, 1);//Print this processes Needs
+	}
+		
+	if (!safe) {//Check for Deadlock
+		// printf("Process %d is in an unsafe state.\n", p);
+		for(p = 0; p < 18; p++){
+			if(processBlock->running[p] == 1){//If > 0 processes running, not deadlocked
+				processRunning = true;
+				break;
+			}
+		}
+		if(processRunning == false){//If no processes running, they are all blocked & deadlocked
+			fprintf(stdout,"DEADLOCKED! Killing the children...\n");
+			kill(-getpid(),SIGINT);
+		}
+		return -1;
+	} else {
+		// printf("The process is in safe state\n");
+		if(processNumPassed == -1){
+			processBlock->running[p] = 1;//Queued process is running again
+		}
+		int numResClasses = 0;
+		int resWanted[20];//Array will hold all res classes this process currently wanting
+		for(r = 0; r < 20; r++){
+			resWanted[r] = -1;
+		}
+		for(r = 0; r < 20; r++){//Count number of resource classes & store the classes in array to choose from
+			if(processBlock->need[p][r] != 0){
+				resWanted[numResClasses] = r;
+				numResClasses++;
+			}
+		}
+		int resourceIndex = rand() % numResClasses;//Pick a random resource to allocate
+		processBlock->requesting[p] = resWanted[resourceIndex];//Pick a random resource to allocate
+	}
+	// fprintf(stdout,"LEAVE deadlock alg\n");
+	return p;
+}
+
+void printNeeds(struct PCB* processBlock, struct resourceTable* resource, int processId, int flag){
+	int p, r;
+	if(flag == 0){
+		fprintf(stdout,"*--------------- Process %d Needs ---------------*\n", processId);
+	}else{
+		fprintf(stdout,"*--------------- Process %d Needs After ---------------*\n", processId);
+	}
+	for(r = 0; r < 20; r++){
+		fprintf(stdout,"%d = %d, ", r, processBlock->need[processId][r]);
+	}
+	fprintf(stdout,"\n");
+	return;
+}
+
+int addQueue(int processId, int resType, int blocked[20][18], int *tail){
+	fprintf(stdout,"Added Process %d to Resource %d's Blocked Queue\n", processId, resType);
+	if(*tail == MAX_SIZE){ // Check to see if the Queue is full
+		fprintf(stdout,"%d QUEUE IS FULL\n",processId);
+		return 0;
+	}
+	*tail = *tail + 1;
+	blocked[resType][*tail % MAX_SIZE] = processId;// Add the item to the Queue
+	// fprintf(stdout,"blocked[%d][%d] = %d = %d, tail = %d \n",resType, *tail % MAX_SIZE, processId,blocked[resType][*tail % MAX_SIZE], *tail);
+	return 1;
+}
+
+void printQueue(int r, int p, int blocked[r][p]){
+	fprintf(stdout,"Blocked Queues: ");
+	int x, y;
+	for(y = 0; y < 20; y++){
+		fprintf(stdout,"%d [", y);
+		for(x = 0; blocked[y][x] != -1; x++){
+			fprintf(stdout,"%d ",blocked[y][x]);
+		}
+		fprintf(stdout,"], ", y);
+	}
+	fprintf(stdout,"\n");
+	return;
+}
+
+int inQueue(int r, int p, int blocked[r][p], int resType, int processId){
+	int i;
+	for(i = 0; blocked[resType][i] != -1; i++){//Move elements forward in the queue
+		if(blocked[resType][i] == processId){
+			return 1;//Process already in queue
+		}
+	}
+	return 0;//Process not in queue
+}
+
+int queueEmpty(int r, int p, int blocked[r][p], int resType){
+	int n = 0, x;
+	for(x = 0; blocked[resType][x] != -1; x++){
+		n++;
+		return n;
+	}
+	return n;//If 0 is empty
+}
+
+int allQueuesEmpty(int r, int p, int blocked[r][p]){
+	int x, y;
+	for(x = 0; x < p; x++){
+		for(y = 0; blocked[x][y] != -1; y++){
+			return 0;
+		}
+	}
+	return 1;//All queues empty
+}
+
+int selectFromQueue(int blocked[], int *tail, int processId){
+	// fprintf(stderr,"tail: %d, processId: %d \n", *tail, processId);
+	if(*tail == -1){// Check for empty Queue
+		// fprintf(stderr,"BLOCKED QUEUE IS EMPTY \n");
+		return -1;  // Return 0 if queue is empty
+	}else{
+		*tail = *tail - 1;
+		// fprintf(stdout,"processId Want = %d, tail = %d\n",processId, *tail);
+		int i = 0;
+		while(blocked[i] != processId){//Find element in queue
+			// fprintf(stdout,"Id search blocked[%d] = %d != %d\n",i, blocked[i], processId);
+			i++;
+		}
+		// fprintf(stdout,"Id Found blocked[%d] = %d\n",i, blocked[i]);
+		processId = blocked[i];// Get Id to return
+		blocked[i] = -1;
+		// int i = 1;
+		while(blocked[i + 1] != -1){//Move elements forward in the queue
+			// fprintf(stdout,"Shift blocked[%d] = %d\n",i , blocked[i + 1]);
+			blocked[i] = blocked[i + 1];
+			i++;
+		}
+		// fprintf(stdout,"blocked[%d] = 0\n",i);
+		blocked[i] = -1;//Set last spot that was filled to 0 since process moved up in queue
+		// fprintf(stdout,"Oss: Select queue return: %d\n",processId);
+		return processId;// Return popped Id
+	}
+}
+
+int countArray(int array[]){
+	int n = 0, x;
+	for(x = 0; x < 18; x++){
+		if(array[x] != 0){
+			n++;
+		}
+	}
+	return n;
+}
+
+void advanceClock(int *clockSecs, int *clockNanos){//1 sec = 1,000 milli = 1,000,000 micro = 1,000,000,000 nano
+	waitClock();
+	// int randTime = rand() % 9999 + 1;//simulate overhead activity for each iteration by 0.001s
+	int randTime = rand() % 999 + 1;//simulate overhead activity for each iteration by 0.0001s
+	*clockNanos += randTime;
+	// fprintf(stdout,"ENTER clockNanos %d, randTime %d, %d += %d\n",*clockNanos,randTime,*clockNanos,randTime);
+	if(*clockNanos > 999999999){
+		*clockSecs = *clockSecs + 1;
+		*clockNanos -= 1000000000;
+	}
+	// fprintf(stdout,"LEAVE clockSecs %d, clockNanos %d\n",*clockSecs,*clockNanos);
+	signalClock();
+}
+
+double getTotalTime(int *clockSecs, int *clockNanos, double *time){
+	// double time = (double)*clockSecs + ((double)*clockNanos/1000000000);
+	*time = 0;
+	*time = (double)*clockSecs + ((double)*clockNanos/1000000000);
+	return *time;
+}
+
+void clearBit(int bv[], int i){//Clear the process from the process table
+  int j = i/32;
+  int pos = i%32;//2 % 32 = 2.  33 % 32 = 1.
+  unsigned int flag = 1;  // flag = 0000.....00001
+  flag = flag << pos;     // flag = 0000...010...000   (shifted i positions)
+  flag = ~flag;           // flag = 1111...101..111 - Reverse the bits
+  bv[j] = bv[j] & flag;   // RESET the bit at the i-th position in bv[i]
+  //OR this is all the above consolidated: bv[i/32] &= ~(1 << (i%32));
+}
+
+void set(int bv[], int i){//set value in bv.  i is value to set in bv array
+  int j = i/32;//Get the array position
+  int pos = i%32;//Get the bit position
+  unsigned int flag = 1;   // flag = 0000.....00001
+  flag = flag << pos;      // flag = 0000...010...000   (shifted i positions)
+  int p;
+	// fprintf(stdout,"set flag: %d\n", flag);
+
+  bv[j] = bv[j] | flag;    // Set the bit at the i-th position in bv[i]
+  //OR this is all the above consolidated: bv[i/32] |= 1 << (i%32);
+}
+
+int member(int bv[], int i){//check if i in bv
+  int j = i/32;//Get the array position
+  int pos = i%32;//Get the bit position
+  unsigned int flag = 1;  // flag = 0000.....00001
+  flag = flag << pos;     // flag = 0000...010...000   (shifted i positions)
+  int p;
+	// fprintf(stdout,"member flag: %d, number looking for: %d\n", flag, i);
+  // fprintf(stdout,"member bv[%d]: %d\n", j, bv[j]);
+  if (bv[j] & flag)// Test the bit at the k-th position in bv[i]
+	 return 1;
+  else
+	 return 0;
+ //OR this is all the above consolidated: return ((bv[i/32] & (1 << (i%32) )) != 0) ;
+}
+
+int bvFull(int bv[], int numProcesses){//check if i in bv
+	int i;
+	for(i = 0; i <= numProcesses; i++){
+		  int j = i/32;//Get the array position
+		  int pos = i%32;//Get the bit position
+		  unsigned int flag = 1;  // flag = 0000.....00001
+		  flag = flag << pos;     // flag = 0000...010...000   (shifted i positions)
+		  int p;
+		  if (bv[j] & flag){// Test the bit at the k-th position in bv[i]
+			//Spot taken
+		  }else{
+			  return 0;//Spot open
+		  }
+	}
+	return 1;//Is full
+}
+
+int bvEmpty(int bv[], int numProcesses){//check if i in bv
+	int i;
+	for(i = 1; i <= numProcesses; i++){
+		  int j = i/32;//Get the array position
+		  int pos = i%32;//Get the bit position
+		  unsigned int flag = 1;  // flag = 0000.....00001
+		  flag = flag << pos;     // flag = 0000...010...000   (shifted i positions)
+		  int p;
+		  if (bv[j] & flag){// Test the bit at the k-th position in bv[i]
+			return 0;//Not empty
+		  }else{
+		  }
+	}
+	return 1;//Is empty
+}
+
+void waitClock(){
+	//fprintf(stdout,"waitClock child %d\n",childId);
+	operation.sem_num = 0;/* Which semaphore in the semaphore array*/
+    operation.sem_op = -1;/* Subtract 1 from semaphore value*/
+    operation.sem_flg = 0;/* Set the flag so we will wait*/
+    if(semop(semId, &operation, 1) == -1){
+        exit(EXIT_FAILURE);
+    }
+}
+
+void signalClock(){
+	//fprintf(stdout,"signalClock\n");
+	operation.sem_num = 0;/* Which semaphore in the semaphore array*/
+    operation.sem_op = 1;/* Add 1 to semaphore value*/
+    operation.sem_flg = 0;/* Set the flag so we will wait*/
+	if(semop(semId, &operation, 1) == -1){
+        exit(EXIT_FAILURE);
+    }
+}
+
+void waitRemove(){
+	// fprintf(stdout,"waitClock child %d\n",childId);
+	removeP.sem_num = 0;/* Which semaphore in the semaphore array*/
+    removeP.sem_op = -1;/* Subtract 1 from semaphore value*/
+    removeP.sem_flg = 0;/* Set the flag so we will wait*/
+    if(semop(semIdR, &removeP, 1) == -1){
+        exit(EXIT_FAILURE);
+    }
+}
+
+void signalRemove(){
+	// fprintf(stdout,"signalClock\n");
+	removeP.sem_num = 0;/* Which semaphore in the semaphore array*/
+    removeP.sem_op = 1;/* Add 1 to semaphore value*/
+    removeP.sem_flg = 0;/* Set the flag so we will wait*/
+	if(semop(semIdR, &removeP, 1) == -1){
+        exit(EXIT_FAILURE);
+    }
+}
+
+double genRandomDouble(){
+	// fprintf(stdout,"returning %.9f\n", ((double)rand() * ( 0.5 - 0 ) ) / (double)RAND_MAX + 0);
+	// return ((double)rand() * (max - min)) / (double)RAND_MAX + min;
+	return ((double)rand() * ( 0.5 - 0 ) ) / (double)RAND_MAX + 0;//[0-500ms]
+}
+
+/*$Author: o2-gray $
+ *$Date: 2016/04/10 03:01:56 $
+ *$Log: oss.c,v $
+ *Revision 1.9  2016/04/10 03:01:56  o2-gray
+ *Finishing up final details and putting statistics together
+ *
+ *Revision 1.8  2016/04/09 03:17:39  o2-gray
+ *Testing with multiple processes now
+ *
+ *Revision 1.7  2016/04/08 03:17:53  o2-gray
+ *Processes not in Queues running good, now implementing taking care of
+ *running a Blocked Process in a queue if another process not Requesting
+ *resources at the time.
+ *
+ *Revision 1.6  2016/04/06 03:17:56  o2-gray
+ *Algorithm running with 1 process.
+ *ToDo: Test multiple processes, statistics at the end
+ *
+ *Revision 1.4  2016/04/02 03:56:43  o2-gray
+ *Starting to try making oss communicate with processes on resource needs.
+ *To do: Bankers algorithm, statistics, test with more processes
+ *
+ *Revision 1.3  2016/04/01 03:06:53  o2-gray
+ *All resource values are initialized and starting to exec to child processes
+ *Signaling created and handled
+ *
+ *Revision 1.2  2016/03/31 03:36:27  o2-gray
+ *Changed how I'm doing my resource struct so made sure everything initializing correctly.
+ *
+ *Revision 1.1  2016/03/30 04:00:10  o2-gray
+ *Initial revision
+ *
+ */
+@
+
+
+1.9
+log
+@Finishing up final details and putting statistics together
+@
+text
+@d4 2
+a5 2
+int semKey2 = 8008135, semId2;//For printing resources in process.c
+int semKeyR = 3333333, semIdR;//For printing resources in process.c
+d15 5
+a19 4
+/**************************************************************
+Initialize vars.  numAllowed & runTime can be changed safely
+**************************************************************/
+int numAllowed = 1;//Number of processes allowing to be created
+d21 1
+a53 1
+//Create & Attach to Shared Memory: shared memory segment specified by shmidVal2 to the address space
+a63 1
+//Create & Attach to Shared Memory: shared memory segment specified by shmidVal3 to the address space
+d88 1
+a88 7
+if((semId2 = semget(semKey2,1,IPC_CREAT | 0666)) == -1){
+	fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror(" semget");
+	exit(EXIT_FAILURE);
+}
+semctl(semId2, 0, SETVAL, 1);
+if((semIdR = semget(semKeyR,1,IPC_CREAT | 0666)) == -1){//For advancing clock
+d93 1
+a93 10
+semctl(semIdR, 0, SETVAL, 1);//Initialize binary semaphore for removing from bv, unlocked from start
+
+//Create semaphore
+// if((semIdCond = semget(semKeyCond,1,IPC_CREAT | 0666)) == -1){
+	// fprintf(stderr,"%s",__FILE__);
+	// perror(" semget");
+	// exit(EXIT_FAILURE);
+// }
+// semctl(semIdCond, 0, SETVAL, 1);//Initialize semaphore
+
+a100 1
+	// resource->total[r] = 10;//The total amount of this resource [1-10]
+a101 2
+	// resource->available[r] = 0;//The total amount available of this resource
+	// fprintf(stdout,"type: %d, total: %d, available: %d\n",resource->type[r], resource->total[r], resource->available[r]);
+a105 1
+		// fprintf(stdout,"Process %d allocated %d, needing %d of type %d \n",p, processBlock->allocated[p][r], processBlock->need[p][r], processBlock->release[p][r], r);
+d112 2
+a113 2
+		resource->blocked[r][p] = -1;
+		processBlock->maxClaim[p][r] = -1;
+d115 2
+a116 8
+}
+for(r = 0; r < 20; r++){
+	resource->blockedTail[r] = -1;
+}
+
+for(p = 0; p < 18; p++){
+	processBlock->running[p] = -1;
+	processBlock->requesting[p] = -1;
+a121 3
+for(r = 0; r < 20; r++){
+	resource->shared[r] = false;
+}
+a177 1
+	// fprintf(stdout,"Resource[%d] total: %d\n",r,resource->total[r]);
+d181 1
+a181 1
+fprintf(stdout,"********************************Total resources***********************************\n");
+d186 10
+a195 1
+// fprintf(stdout,"**********************************************************************************\n\n");
+d200 2
+a201 2
+processBlock->processDone = -1;
+processBlock->processRequesting = -1;
+d205 2
+a206 1
+numAllowed = 9;
+d210 3
+a212 26
+	while(processCounter > 5 && totalTime > 1){//If too many child processes, wait on them
+		// waitingPid = waitpid(-1, &status, WUNTRACED | WCONTINUED);
+		// waitingPid = waitpid(-1, &status, WUNTRACED);
+		waitingPid = waitpid(-1, &status, WNOHANG);
+		if(waitingPid == -1){
+			fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+			perror("waitpid");
+			exit(EXIT_FAILURE);
+		}	
+		// else if (WIFEXITED(status) && !WEXITSTATUS(status))
+			// printf("Child %ld terminated normally\n", (long)waitingPid);
+		// else if (WIFEXITED(status))
+			// printf("Child %ld terminated with return status %d\n",(long)waitingPid, WEXITSTATUS(status));
+		// else if (WIFSIGNALED(status))
+			// printf("Child %ld terminated due to uncaught signal %d\n",(long)waitingPid, WTERMSIG(status));
+		// else if (WIFSTOPPED(status))
+			// printf("Child %ld stopped due to signal %d\n",(long)waitingPid, WSTOPSIG(status));
+		
+		processCounter--;//Decr since one gone now	
+		fprintf(stdout,"processCounter %d\n",processCounter);
+	}
+	
+	// fprintf(stdout,"BEFORE time: %.9f, randTime: %.9f, time passed: %.9f\n",totalTime, randTime, totalTime - prevTotalTime);
+	if(((totalTime - prevTotalTime) > randTime) && processId <= numAllowed){
+	// if(((totalTime - prevTotalTime) > randTime) && processCounter < 5 ){
+		fprintf(stdout,"processCounter %d, processId %d\n", processCounter, processId);
+a214 1
+		// fprintf(stdout,"AFTER time: %.9f, prevTotalTime: %.9f, time passed: %.9f\n",totalTime, prevTotalTime, totalTime - prevTotalTime);
+d216 1
+a216 1
+		if(bvFull(bv, numAllowed) == 1){//Make sure bitVector/Process table not full. If is, don't generate new process
+d227 1
+a227 1
+			fprintf(stdout,"New child %d / %d, time: %.9f\n",processId, getpid(),prevTotalTime);
+d229 2
+d233 3
+d241 1
+a241 1
+			// sprintf(tempPriority,"%d", processBlock->priority[processId]);//For passing the ID through exec 
+d257 1
+d259 7
+a265 2
+		fprintf(stdout,"|||||||||||||||||||  Process being removed %d\n",processBlock->processDone);
+		numberCompleted++;
+d274 5
+a278 5
+		if(processBlock->processRequesting == -1){//If tried running a queued process
+			if(processBlock->running[pid] == 1){//If was allocated to
+				processBlock->idle[pid] = getTotalTime(&timer->clockSecs, &timer->clockNanos, &totalTime) - processBlock->idle[pid];//Curr time - time blocked
+				processBlock->cpuTimeUsed[pid] = processBlock->cpuTimeUsed[pid] - processBlock->idle[pid];//Subtract it from CPU time used
+			}
+d280 1
+d286 2
+a287 1
+	if(t > 500000 && bvEmpty(bv, numAllowed) == 1){//So get some feedback if all processes done and oss time not up
+d292 6
+a297 3
+	if(totalTime > runTime){//If time is up and bitVector/Process table empty
+		// fprintf(stdout,"Time is up!\n");
+		fprintf(stdout,"Time is up! bv empty? %d\n", bvEmpty(bv, numAllowed));
+d300 43
+d345 6
+a350 13
+// sleep(1);//To make sure final/remaining values can be updated by running processes before calculations, otherwise throws them off
+/*******************************************************************************
+Statistics: CPU idle time, Average turnaround time, Average waiting time
+*******************************************************************************/
+/*
+double total = 0;
+fprintf(stdout,"\n************************************************************\n");
+fprintf(stdout,"cpuTimeUsed times:\n");
+for(r = 1; r <= numberCompleted; r++){
+	fprintf(stdout,"%d: %.9f	  ",r,processBlock->cpuTimeUsed[r]);
+	total += processBlock->cpuTimeUsed[r];
+	// fprintf(stdout,"total: %.9f\n",total);
+	if(r % 3 == 0){
+d354 3
+a356 4
+fprintf(stdout,"\nAverage cpuTimeUsed: %.9f\n",(total/(double)numberCompleted));
+fprintf(stdout,"CPU ran for: %.9f\n",totalTime);
+fprintf(stdout,"Total cpuTimeUsed: %.9f\n",total);
+fprintf(stdout,"Time CPU was idle: %.9f - %.9f = %.9f\n",totalTime, total, totalTime - total);
+d358 5
+a362 7
+fprintf(stdout,"************************************************************");
+fprintf(stdout,"\nTurnaround times:\n");
+for(r = 1; r <= numberCompleted; r++){
+	fprintf(stdout,"%d: %.9f	  ",r,processBlock->totalSystemTime[r]);
+	total = total + processBlock->totalSystemTime[r];
+	// fprintf(stdout,"time %.9f + total: %.9f\n",total);
+	if(r % 3 == 0){
+d366 17
+a382 10
+fprintf(stdout,"\nAverage turnaround time: %.9f/%d = %.9f\n", total, numberCompleted, total/(double)numberCompleted);
+total = 0;
+fprintf(stdout,"************************************************************\n");
+fprintf(stdout,"Waiting times:\n");
+for(r = 1; r <= numberCompleted; r++){
+	fprintf(stdout,"%d: %.9f	  ",r,processBlock->totalSystemTime[r] - ((double)processBlock->burstTime[r]/1000000000));
+	total = total + processBlock->totalSystemTime[r] - ((double)processBlock->burstTime[r]/1000000000);
+	// fprintf(stdout,"time %.9f + total: %.9f\n",total);
+	if(r % 3 == 0){
+		fprintf(stdout,"\n");
+d384 1
+d386 1
+a386 3
+fprintf(stdout,"\nAverage Waiting time: %.9f/%d = %.9f\n",total, numberCompleted, total/(double)numberCompleted);
+fprintf(stdout,"************************************************************\n");
+*/
+a388 1
+	
+d396 1
+a396 1
+	if(allQueuesEmpty(20, 18, resource->blocked) == 0){//If > 0 processes running, not deadlocked
+d399 1
+a399 5
+	fprintf(stdout,"childrenAlive = %d\n", childrenAlive);
+	fprintf(stdout,"bv empty: %d\n", bvEmpty(bv, numAllowed));
+   // if(bvEmpty(bv, numAllowed) == 0){
+   if(childrenAlive){
+		//If processes still alive, kill them
+d409 5
+a413 2
+		fprintf(stderr,"     ");
+		printQueue(20, 18, resource->blocked);
+d432 1
+a432 1
+//Detach from shared mem
+a437 1
+//Remove shared mem when all processes done
+a442 1
+//Detach from shared mem
+a447 1
+//Remove shared mem when all processes done
+a452 1
+//Detach from shared mem
+a457 1
+//Remove shared mem when all processes done
+a474 5
+if(semctl(semId2, 0, IPC_RMID) == -1){//For clock
+    fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	perror("semctl");
+	exit(EXIT_FAILURE);
+}
+a554 5
+			if(semctl(semId2, 0, IPC_RMID) == -1){//For clock
+				fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				perror("semctl");
+				exit(EXIT_FAILURE);
+			}
+a583 1
+	int currRunCount = countArray(processBlock->running);
+d596 1
+a596 1
+		for(r = 0; r < 20; r++){//int blocked[20][18]   firstInQueue(int r, int p, int blocked[r][p], int resType)
+d632 14
+a645 11
+	for(r = 0; r < 20; r++){
+		if(resource->available[r] < processBlock->need[p][r]){//Not enough resources available for this process
+			if(!inQueue(20, 18, resource->blocked, r, p)){//If process not already in queue for requesting resources
+				fprintf(stdout,"Not enough %d resources for %d to run\n", r, p);
+				addQueue(p, r, resource->blocked, &resource->blockedTail[r]);//Add to blocked queue since can't run
+				processBlock->running[p] = 0;
+				processBlock->requesting[p] = r;//Waiting on this resource to become available
+				fprintf(stdout,"Deadlock Alg %d processBlock->running[%d] = %d...\n", p, p, processBlock->running[p]);
+				printQueue(20, 18, resource->blocked);
+			}else{
+				// fprintf(stdout,"%d ALREADY QUEUED, running = %d\n", p, processBlock->running[p]);
+d647 4
+a650 2
+			exec = 0;
+			break;
+d656 1
+a656 1
+		// printNeeds(processBlock , resource, p, 0);
+a657 1
+		// fprintf(stdout,"resourceGiving = %d\n", resourceGiving);
+d676 1
+a676 1
+		// printNeeds(processBlock , resource, p, 1);
+d691 1
+a709 2
+		
+		// processBlock->processRequesting = -1;
+a710 1
+		
+a722 1
+		// fprintf(stdout,"%d available = %d, allocated = %d, need = %d\n", r, resource->available[r], processBlock->allocated[processId][r], processBlock->need[processId][r]);
+a761 1
+	// fprintf(stdout,"Process %d NOT in quueue\n",processId);
+d771 1
+a771 1
+	return n;//Is 0, empty
+d781 1
+a781 1
+	return 1;
+a783 10
+int firstInQueue(int r, int p, int blocked[r][p], int resType){
+	int processId = blocked[resType][0];	// Get character to return
+	if(processId == -1){
+		fprintf(stderr,"No element in 1st position of queue \n");
+		return -1;
+	}
+	return processId;// Return popped character
+}
+
+
+d787 1
+a787 1
+		fprintf(stderr,"BLOCKED QUEUE IS EMPTY \n");
+d808 1
+a808 1
+		fprintf(stdout,"Oss: Select queue return: %d\n",processId);
+d815 4
+a818 2
+	for(x = 0; array[x] != -1; x++){
+		n++;
+d961 1
+a961 1
+ *$Date: 2016/04/09 03:17:39 $
+d963 3
+@
+
+
+1.8
+log
+@Testing with multiple processes now
+@
+text
+@d4 2
+a5 1
+// int semKey2 = 90210, semId2;//For processes requesting resources
+d22 1
+a22 1
+int processId = 0, processToRunId = -1, processRequestId = -1;
+d28 1
+a28 1
+int a, b;//for loop vars
+d88 12
+d113 12
+a124 12
+for(a = 0; a < 20; a++){
+	resource->type[a] = a;//The total amount of this resource
+	resource->total[a] = rand() % 10 + 1;//The total amount of this resource [1-10]
+	// resource->total[a] = 10;//The total amount of this resource [1-10]
+	resource->available[a] = resource->total[a];//The total amount available of this resource
+	// resource->available[a] = 0;//The total amount available of this resource
+	// fprintf(stdout,"type: %d, total: %d, available: %d\n",resource->type[a], resource->total[a], resource->available[a]);
+	for(b = 0; b < 18; b++){
+		processBlock->allocated[b][a] = 0;//Amount of resource a process b is allocated
+		processBlock->need[b][a] = 0;//Amount of resource a process b is wanting so can run
+		processBlock->release[b][a] = 0;//Amount of resource a process b has released
+		// fprintf(stdout,"Process %d allocated %d, needing %d of type %d \n",b, processBlock->allocated[b][a], processBlock->need[b][a], processBlock->release[b][a], a);
+d129 4
+a132 4
+for(a = 0; a < 20; a++){
+	for(b = 0; b < 18; b++){
+		resource->blocked[a][b] = -1;
+		processBlock->maxClaim[b][a] = -1;
+d135 2
+a136 2
+for(a = 0; a < 20; a++){
+	resource->blockedTail[a] = -1;
+d139 3
+a141 3
+for(a = 0; a < 18; a++){
+	processBlock->running[a] = -1;
+	processBlock->requesting[a] = -1;
+d147 2
+a148 2
+for(a = 0; a < 20; a++){
+	resource->shared[a] = false;
+d156 3
+a158 3
+			for(a = 0; a < 20; a++){
+				if(a == processShared1 || a == processShared2 || a == processShared3){
+					resource->shared[a] = true;
+d173 3
+a175 3
+			for(a = 0; a < 20; a++){
+				if(a == processShared1 || a == processShared2 || a == processShared3 || a == processShared4){
+					resource->shared[a] = true;
+d190 4
+a193 4
+			for(a = 0; a < 20; a++){
+				if(a == processShared1 || a == processShared2 || a == processShared3 || a == processShared4|| a == processShared5){
+					resource->shared[a] = true;
+					// fprintf(stdout,"Resource[%d] shared: %d\n",a,resource->shared[a]);
+d202 3
+a204 3
+for(a = 0; a < 20; a++){
+	if(resource->shared[a] == 1){
+		fprintf(stdout,"Resource %d, ",a);
+d206 1
+a206 1
+	// fprintf(stdout,"Resource[%d] total: %d\n",a,resource->total[a]);
+d211 2
+a212 2
+for(a = 0; a < 20; a++){//Print resource totals
+	fprintf(stdout,"Res %d = %d, ", a, resource->total[a]);
+d225 2
+a226 2
+numAllowed = 3;
+runTime = 20;
+a227 2
+// for(a = 1; a < numAllowed; a++){
+	// fprintf(stdout,"In Loop\n");
+d229 1
+a229 1
+	// while(processCounter > 18){//If too many child processes, wait on them
+d231 19
+a249 7
+		// if(waitingPid == -1){
+			// fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+                    	// perror("waitpid");
+                    	// exit(EXIT_FAILURE);
+                // }	
+		// processCounter--;//Decr since one gone now	
+	// }
+a250 1
+	// if(0){
+d253 2
+d270 1
+a270 1
+			// fprintf(stdout,"New child %d / %d, time: %.9f\n",processId, getpid(),prevTotalTime);
+d273 1
+a273 1
+			processBlock->totalSystemTime[processId] = 0;//total CPU time used
+d282 1
+a282 1
+			return 1;
+d290 1
+d292 1
+a292 1
+	// }
+d294 1
+d296 2
+a297 1
+		fprintf(stdout,"Process being removed %d\n",processBlock->processDone);
+d299 2
+d305 7
+a311 3
+	// if(processRequestId != -1){//If processes in blocked queue waiting for resources
+		// fprintf(stdout,"processBlock->processRequesting BEFORE deadlock call %d\n", processBlock->processRequesting);
+		deadlock(processBlock, resource, processRequestId);
+a312 1
+		// fprintf(stdout,"processBlock->processRequesting after deadlock = %d\n", processBlock->processRequesting);
+d317 5
+a321 6
+	// fprintf(stdout,"totalTime = %.9f\n",totalTime);
+	// if(t > 1000000){
+		// fprintf(stdout,"time passed = %.9f > %.9f?,  OSS Process requesting %d\n", totalTime - prevTotalTime, randTime, processBlock->processRequesting);
+		// t = 0;
+	// }
+	// t++;
+d337 3
+a339 3
+for(a = 1; a <= numberCompleted; a++){
+	fprintf(stdout,"%d: %.9f	  ",a,processBlock->cpuTimeUsed[a]);
+	total += processBlock->cpuTimeUsed[a];
+d341 1
+a341 1
+	if(a % 3 == 0){
+d352 3
+a354 3
+for(a = 1; a <= numberCompleted; a++){
+	fprintf(stdout,"%d: %.9f	  ",a,processBlock->totalSystemTime[a]);
+	total = total + processBlock->totalSystemTime[a];
+d356 1
+a356 1
+	if(a % 3 == 0){
+d364 3
+a366 3
+for(a = 1; a <= numberCompleted; a++){
+	fprintf(stdout,"%d: %.9f	  ",a,processBlock->totalSystemTime[a] - ((double)processBlock->burstTime[a]/1000000000));
+	total = total + processBlock->totalSystemTime[a] - ((double)processBlock->burstTime[a]/1000000000);
+d368 1
+a368 1
+	if(a % 3 == 0){
+d378 14
+a391 7
+	// waitingPid = waitpid(childPid, &status, WUNTRACED | WCONTINUED);
+	// if(waitingPid == -1){
+		// fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+		// perror("waitpid");
+		// exit(EXIT_FAILURE);
+   // }
+   if(bvEmpty(bv, numAllowed) == 0){
+d403 15
+d470 10
+a543 1
+			
+d555 10
+d592 1
+d595 2
+a596 2
+	if(processNumPassed == -1 && allQueuesEmpty(20, 18, resource->blocked) == 0){//If trying a queued process, pick a random one to run
+		printQueue(20, 18, resource->blocked);
+d603 10
+a612 5
+			if(resource->blockedTail[r] != -1){
+				// processQueued[index] = firstInQueue(20, 18, blocked[20][18], r);
+				processQueued[index] = resource->blocked[r][0];
+				// fprintf(stdout,"resource->blockedTail[%d] = %d, resource->blocked[%d][0] = %d, processQueued[%d] = %d\n",r, resource->blockedTail[r], r, resource->blocked[r][0], index, processQueued[index]);
+				index++;
+d615 2
+a616 1
+		if(index == 1){//If only one process Blocked
+d618 1
+a618 1
+			// fprintf(stdout,"QUEUED index 1 - processToRunId = %d\n", processToRunId);
+d622 1
+a622 1
+			// fprintf(stdout,"QUEUED processToRunId = %d\n", processToRunId);
+d625 1
+d629 6
+a634 1
+	fprintf(stdout,"processToRunId = %d, requesting: %d\n", processToRunId, processBlock->requesting[processToRunId]);	
+a638 1
+		// fprintf(stdout,"resource->available[%d] = %d, processBlock->need[%d][%d] = %d, %d < %d?\n", r, resource->available[r], p, r, processBlock->need[p][r], resource->available[r], processBlock->need[p][r]);
+a639 2
+			fprintf(stdout,"Not enough %d resources for %d to run\n", r, p);
+			// fprintf(stdout,"resource->available[%d] = %d, processBlock->need[%d][%d] = %d, %d < %d?\n", r, resource->available[r], p, r, processBlock->need[p][r], resource->available[r], processBlock->need[p][r]);
+d641 1
+d644 2
+d655 1
+a655 1
+		fprintf(stdout,"Process %d safe to allocate to!\n", p);
+d657 1
+a657 1
+		printResources(processBlock , resource, p);
+d660 1
+a660 6
+		// if(resourceGiving == 0){
+			// fprintf(stdout,"HERE\n");
+			resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+		// }else{
+			// resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+		// }
+a661 1
+			// selectFromQueue(resource->blocked[resourceGiving], resource->blockedTail[p], p);//Remove from queue
+d663 3
+a668 1
+		// fprintf(stdout,"resAmountGiving  rand() mod %d = %d\n", processBlock->need[p][resourceGiving], resAmountGiving);
+d672 5
+a676 2
+		if(!resource->shared[resourceGiving]){//If resources isn't shared, decrement
+			resource->available[resourceGiving] -= resAmountGiving;//Update available number of resources
+d678 1
+a678 2
+		fprintf(stdout,"END ALLOCATING %d of %d to %d:\n", resAmountGiving, resourceGiving, p);
+		printResources(processBlock , resource, p);
+d682 1
+a682 1
+		printf("The process is in an unsafe state.\n");
+d684 2
+a685 6
+			// if(processBlock->maxClaim[p][0] != -1){
+				// num++;//Count num processes alive
+				// fprintf(stdout,"processBlock->maxClaim[%d][0] = %d, num = %d\n", p, processBlock->maxClaim[p][0], num);
+			// }
+			// if(processBlock->running[p] == 0){
+			if(processBlock->running[p] == 1){
+a686 2
+				// notRunning++;//Count processes in blocked queues
+				// fprintf(stdout,"processBlock->running[%d] = %d, notRunning = %d\n", p, processBlock->running[p], notRunning);
+d689 4
+a692 7
+		kill(-getpid(),SIGINT);
+		// fprintf(stdout,"notRunning %d == %d?\n", notRunning, num);
+		// if(notRunning == num){//If all processes are blocked, Deadlocked
+			// fprintf(stdout,"DEADLOCKED! Killing the children...\n");
+			// sleep(1);
+			// kill(-getpid(),SIGINT);
+		// }
+d694 1
+a694 1
+		printf("The process is in safe state\n");
+d698 15
+a712 1
+		processBlock->requesting[p] = -1;
+a714 3
+	/***************************************************
+	No process in queue in safe state if at this point
+	***************************************************/
+d716 1
+a716 2
+	return 1;
+	// return -1;//No process in safe state
+d719 1
+a719 2
+// void printResources(struct resourceTable* resource){
+void printResources(struct PCB* processBlock, struct resourceTable* resource, int processId){
+d721 5
+a725 2
+	// fprintf(stdout,"*************** Process %d **************\n", processId);
+	fprintf(stdout,"*************** Process %d Needs **************\n", processId);
+a733 2
+
+// int addQueue(int processId, int blocked[], int *tail){
+d735 1
+a735 1
+	fprintf(stdout,"Add to queue %d: %d\n", resType, processId);
+d742 1
+a742 1
+	fprintf(stdout,"blocked[%d][%d] = %d = %d, tail = %d \n",resType, *tail % MAX_SIZE, processId,blocked[resType][*tail % MAX_SIZE], *tail);
+a745 2
+
+// void printQueue(int blocked[]){
+d747 1
+a747 3
+	fprintf(stdout,"Blocked Queue: ");
+	// fprintf(stdout,"Blocked Queue r=%d, p=%d: ", r, p);
+
+a763 1
+			// fprintf(stdout,"Process %d ALREADY in quueue\n",processId);
+a781 1
+	// fprintf(stdout,"allQueuesEmpty\n");
+a783 1
+			// fprintf(stdout,"blocked[%d][%d] = %d\n", x, y, blocked[x][y]);
+a790 1
+	// fprintf(stdout,"POP blocked[0] = %d, tail = %d\n",blocked[0],*tail);
+d799 1
+a799 1
+// int selectFromQueue(int blocked[], int tail, int processId){
+d801 1
+a801 3
+// int selectFromQueue(int r, int p, int blocked[r][p], int resType, int *tail, int processId){
+	// fprintf(stderr,"tail: %d, processId: %d \n", tail, processId);
+	fprintf(stderr,"tail: %d, processId: %d \n", *tail, processId);
+a802 1
+	// if(tail == -1){// Check for empty Queue
+d807 1
+a807 3
+		// tail = tail - 1;
+		fprintf(stdout,"processId Want = %d, tail = %d\n",processId, *tail);
+		// fprintf(stdout,"processId Want = %d, tail = %d\n",processId, tail);
+d810 1
+a810 1
+			fprintf(stdout,"Id search blocked[%d] = %d != %d\n",i, blocked[i], processId);
+d813 1
+a813 1
+		fprintf(stdout,"Id Found blocked[%d] = %d\n",i, blocked[i]);
+d818 1
+a818 1
+			fprintf(stdout,"Shift blocked[%d] = %d\n",i , blocked[i + 1]);
+d824 1
+a824 1
+		fprintf(stdout,"Select queue return: %d\n",processId);
+a832 5
+		// fprintf(stdout,"iteration: %d array[%d] = %d\n",x, n, array[x]);
+		// if(n == 20){
+			// n = 20;//Or else will keep finding vals from other parts of mem
+			// break;
+		// }
+a833 1
+	// fprintf(stdout,"\n");
+d839 2
+a840 3
+	// fprintf(stdout,"ENTER clockSecs %d, clockNanos %d\n",*clockSecs,*clockNanos);
+	int randTime = rand() % 9999 + 1;//simulate overhead activity for each iteration by 0.001s
+	// int randTime = rand() % 999 + 1;//simulate overhead activity for each iteration by 0.0001s
+a897 1
+	// for(i = 1; i <= numProcesses; i++){
+d948 6
+a953 6
+void waitSem(){
+	//fprintf(stdout,"waitClock child %d\n",childId);
+	operation2.sem_num = 0;/* Which semaphore in the semaphore array*/
+    operation2.sem_op = -1;/* Subtract 1 from semaphore value*/
+    operation2.sem_flg = 0;/* Set the flag so we will wait*/
+    if(semop(semId, &operation2, 1) == -1){
+d958 6
+a963 6
+void signalSem(){
+	//fprintf(stdout,"signalClock\n");
+	operation2.sem_num = 0;/* Which semaphore in the semaphore array*/
+    operation2.sem_op = 1;/* Add 1 to semaphore value*/
+    operation2.sem_flg = 0;/* Set the flag so we will wait*/
+	if(semop(semId, &operation2, 1) == -1){
+d975 1
+a975 1
+ *$Date: 2016/04/08 03:17:53 $
+d977 3
+@
+
+
+1.7
+log
+@Processes not in Queues running good, now implementing taking care of
+running a Blocked Process in a queue if another process not Requesting
+resources at the time.
+@
+text
+@d102 2
+a103 2
+	// resource->total[a] = rand() % 10 + 1;//The total amount of this resource [1-10]
+	resource->total[a] = 10;//The total amount of this resource [1-10]
+d105 1
+d125 1
+a125 2
+// resource->blockedTail = -1;
+fprintf(stdout,"\n");
+d212 2
+a213 1
+numAllowed = 0;
+d228 1
+a228 1
+	if(0){
+d247 1
+d267 1
+a267 1
+	}
+a273 26
+	
+	// processRequestId = -1;
+	// addQueue(processId, 0, resource->blocked, &resource->blockedTail[0]);//Add to blocked queue since can't run
+	// processBlock->requesting[0] = 0;
+	// addQueue(0, 0, resource->blocked, &resource->blockedTail[0]);//Add to blocked queue since can't run
+	// printQueue(20, 18, resource->blocked);
+	if(t == 0){
+		processBlock->requesting[1] = 0;
+		addQueue(1, 0, resource->blocked, &resource->blockedTail[0]);//Add to blocked queue since can't run
+		printQueue(20, 18, resource->blocked);
+		int r;
+		for(r = 0; r < 20; r++){//Figure out this processes max claim for each resource
+			processBlock->maxClaim[1][r] = rand() % resource->total[r];//Max claim = [0-total number of this resource in system]
+			// fprintf(stdout,"Res %d = %d, ", r, processBlock->maxClaim[processId][r]);
+		}
+		for(r = 0; r < 20; r++){
+			processBlock->need[1][r] = processBlock->maxClaim[1][r] - processBlock->allocated[1][r];//Need = Max - Allocated
+			fprintf(stdout,"%d of %d, ", processBlock->need[1][r], r);
+		}
+	}
+	t++;
+	int e = allQueuesEmpty(20, 18, resource->blocked);
+	fprintf(stdout,"allQueuesEmpty = %d\n", e);
+	printQueue(20, 18, resource->blocked);
+	// break;
+	
+d286 5
+a290 6
+	if(t > 1000000){
+		fprintf(stdout,"time passed = %.9f > %.9f?,  OSS Process requesting %d\n", totalTime - prevTotalTime, randTime, processBlock->processRequesting);
+		t = 0;
+	}
+	t++;
+	// if(totalTime > runTime && bvEmpty(bv, numAllowed) == 1){//If time is up and bitVector/Process table empty
+d353 14
+a366 14
+   
+	//If processes still alive, kill them
+		// fprintf(stdout,"Time is up, but children remain and must be eradicated...\n");
+		// fprintf(stdout,"     _.--''--._\n");
+		// fprintf(stdout,"    /  _    _  \\ \n");
+		// fprintf(stdout," _  ( (_\\  /_) )  _\n");
+		// fprintf(stdout,"{ \\._\\   /\\   /_./ }\n");
+		// fprintf(stdout,"/_'=-.}______{.-='_\\ \n");
+		// fprintf(stdout," _  _.=('''')=._  _\n");
+		// fprintf(stdout,"(_''_.-'`~~`'-._''_)\n");
+		// fprintf(stdout," {_'            '_}\n");
+		// fprintf(stderr,"     ");
+		// kill(-getpid(),SIGTERM);
+		// kill(-getpid(),SIGINT);
+d423 1
+a423 1
+	printf("MASTER process id %d  signal %d\n", getpid(),mysignal);
+a514 1
+	// fprintf(stdout,"In deadlock alg\n");
+d519 1
+a519 1
+	int resourceGiving, resAmountGiving;
+d521 4
+a524 27
+	// int processRun[18];//Array will hold all res classes this process currently wanting
+	// for(p = 0; p < 18; p++){
+		// processRun[p] = -1;
+	// }
+	
+	// if(processToRunId != -1){//Not in queue
+		// processRun[0] = processToRunId;//Process requesting runs first
+		// fprintf(stdout,"%d running = %d, processRun[%d] = %d\n", 0, processBlock->running[0], 0, processRun[0]);
+		// int index = 1;
+		// for(p = 1; p < 18; p++){
+			// if(processBlock->running[p] == 1){//Store running processes Ids
+				// if(p != processRun[0]){//Make sure don't get 1st Id again
+					// fprintf(stdout,"%d running = %d, processRun[%d] = %d\n", p, processBlock->running[p], p, processRun[p]);
+					// processRun[index] = p;
+					// index++;
+				// }
+			// }
+		// }
+	// }
+	// for(p = 0; p < 18; p++){
+		// if(processRun[p] != -1){
+			// fprintf(stdout,"processRun[%d] = %d\n", p, processRun[p]);
+		// }
+	// }
+	
+	if(processNumPassed == -1){//If trying a queued process
+		int processQueued[20];//Array will hold all res classes this process currently wanting
+d533 1
+a533 1
+				fprintf(stdout,"resource->blockedTail[%d] = %d, resource->blocked[%d][0] = %d, processQueued[%d] = %d\n",r, resource->blockedTail[r], r, resource->blocked[r][0], index, processQueued[index]);
+d537 1
+a537 1
+		if(index == 1){
+d539 3
+a541 3
+			fprintf(stdout,"QUEUED index 1 - processToRunId = %d\n", processToRunId);
+		}else{
+			int processIndex = rand() % index + 1;
+d543 1
+a543 1
+			fprintf(stdout,"QUEUED processToRunId = %d\n", processToRunId);
+d545 2
+d549 48
+a596 3
+	fprintf(stdout,"processToRunId = %d, requesting: %d\n", processToRunId, processBlock->requesting[processToRunId]);
+	// return 0;
+	// while(currRunCount != 0){//While queue not empty
+d598 6
+a603 32
+		safe = 0;
+		// for(i = 0; i < currRunCount; i++){
+			// p = processRun[i];
+			p = processToRunId;
+			// fprintf(stdout,"currRunCount %d, processRun[%d] = %d\n", currRunCount, i, p);
+			// fprintf(stdout,"processRun[%d] = %d\n", i, p);
+			if(processBlock->running[p]){
+				exec = 1;
+				for(r = 0; r < 20; r++){
+					if(resource->available[r] < processBlock->need[p][r]){//Not enough resources available for this process
+						fprintf(stdout,"Not enough resources for %d to run\n", resource->blocked[p]);
+						if(!inQueue(20, 18, resource->blocked, r, p)){//If process not already in queue for requesting resources
+							addQueue(p, r, resource->blocked, &resource->blockedTail[r]);//Add to blocked queue since can't run
+							processBlock->running[p] = 0;
+							printQueue(20, 18, resource->blocked);
+						}
+						exec = 0;
+						// break;
+					}
+				}
+			}
+			// else{//Try to allocate to queued processes
+				// for(r = 0; r < 20; r++){
+					// if(resource->available[r] < processBlock->need[p][r]){//Not enough resources available for this process
+						// fprintf(stdout,"Still Not enough resources for Queued %d to run\n", resource->blocked[p]);
+						// processBlock->running[p] = 0;
+						// currRunCount--;//Only try this process once since blocked
+						// printQueue(20, 18, resource->blocked);
+						// exec = 0;
+						// break;
+					// }
+				// }
+d605 5
+a609 34
+			if(exec){
+				fprintf(stdout,"Process %d safe to allocate to!\n", p);
+				safe = 1;
+				// currRunCount--;
+				printResources(processBlock , resource, p);
+				// fprintf(stdout,"After printResources\n");
+				// int resourceIndex = rand() % numResClasses;//Pick a random resource to allocate
+				// fprintf(stdout,"resourceIndex = %d\n", resourceIndex);
+				// resourceGiving = resWanted[resourceIndex];//Pick a random resource to allocate
+				resourceGiving = processBlock->requesting[p];//Resource to allocate
+				fprintf(stdout,"resourceGiving = %d\n", resourceGiving);
+				// if(resourceGiving == 0){
+					// fprintf(stdout,"HERE\n");
+					resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+				// }else{
+					// resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+				// }
+				if(processNumPassed == -1){//Resource allocated, no longer in Queue
+					// selectFromQueue(resource->blocked[resourceGiving], resource->blockedTail[p], p);//Remove from queue
+					int w = selectFromQueue(resource->blocked[resourceGiving], &resource->blockedTail[resourceGiving], p);//Remove from queue
+					fprintf(stdout,"Process %d REMOVED from queue\n", w);
+					processBlock->running[p] = 1;//Is running again
+					printQueue(20, 18, resource->blocked);
+				}
+				fprintf(stdout,"resAmountGiving  rand() mod %d = %d\n", processBlock->need[p][resourceGiving], resAmountGiving);
+				// fprintf(stdout,"%d numResClasses = %d, Giving %d of res %d\n", p, numResClasses, resAmountGiving, resourceGiving);
+				processBlock->allocated[p][resourceGiving] = processBlock->allocated[p][resourceGiving] + resAmountGiving;//Allocate resource for this process
+				processBlock->need[p][resourceGiving] = processBlock->maxClaim[p][resourceGiving] - processBlock->allocated[p][resourceGiving];//Need = Max - Allocated
+				if(!resource->shared[resourceGiving]){//If resources isn't shared, decrement
+					resource->available[resourceGiving] -= resAmountGiving;//Update available number of resources
+				}
+				fprintf(stdout,"END ALLOCATING %d of  %d to %d:\n", resAmountGiving, resourceGiving, p);
+				printResources(processBlock , resource, p);
+				// processBlock->requesting[p] = -1;
+d611 16
+a626 19
+			
+			if (!safe) {
+				printf("The process is in an unsafe state.\n");
+				// printf("The processes are in unsafe state.\n");
+				// break;
+			} else {
+				printf("The process is in safe state\n");
+				// printf("Safe sequence is:");
+				// for (i = 0; i < r; i++) {
+					// printf("\t%d", avl[i]);
+				// }
+				// printf("\n");
+			}
+		/***************************************************
+		Big part of this algorithm is to make sure future processes can run after this one, make sure that's accounted for.  Research alg more
+		***************************************************/
+		// }//END for loop
+	// }//END while loop
+	processBlock->requesting[p] = -1;
+d912 1
+a912 1
+ *$Date: 2016/04/06 03:17:56 $
+d914 5
+@
+
+
+1.6
+log
+@Algorithm running with 1 process.
+ToDo: Test multiple processes, statistics at the end
+@
+text
+@d102 2
+a103 1
+	resource->total[a] = rand() % 10 + 1;//The total amount of this resource [1-10]
+d113 1
+a113 6
+fprintf(stdout,"********************************Shared resources***********************************\n");
+//15-25% of these 20 resources will be shared.  So 3-5 of them.
+int amountShared = rand() % 3 + 3;// [3-5]
+for(a = 0; a < 20; a++){
+	resource->shared[a] = false;
+}
+d128 1
+d131 6
+d142 1
+a142 1
+			fprintf(stdout, "All 3 different: %d, %d, %d\n",processShared1, processShared2, processShared3);
+d159 1
+a159 1
+			fprintf(stdout, "All 4 different: %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4);
+d176 1
+a176 1
+			fprintf(stdout, "All 5 different: %d, %d, %d, %d, %d\n",processShared1, processShared2, processShared3, processShared4, processShared5);
+d191 1
+a191 1
+		fprintf(stdout,"Resource[%d] shared: %d, ",a,resource->shared[a]);
+d227 1
+a227 1
+	// if(0){
+d265 1
+a265 1
+	// }
+d275 2
+d278 19
+d299 2
+a300 2
+	// if(allQueuesEmpty(20, 18, resource->blocked) == 0 || processBlock->processRequesting != -1){//If processes in blocked queue waiting for resources
+	if(processRequestId != -1){//If processes in blocked queue waiting for resources
+d304 1
+a304 1
+		fprintf(stdout,"processBlock->processRequesting after deadlock = %d\n", processBlock->processRequesting);
+d541 1
+a541 1
+	int r, p;//for loop vars
+d544 1
+d546 4
+a549 3
+		
+	// for(r = 0; r < 18; r++){
+		// fprintf(stdout,"totalSystemTime[%d] = %.9f\n", r, processBlock->totalSystemTime[r]);
+d551 14
+a564 2
+	// for(r = 0; r < 20; r++){
+		// fprintf(stdout,"resource->total[%d] = %d\n", r, resource->total[r]);
+d566 4
+a569 17
+	
+	// fprintf(stdout,"Current resources available: ");
+	// for (r = 0; r < 20; r++) {
+		// for (p = 0; p < 18; p++) {
+			// resource->alloc[j] += curr[i][j];
+			// resource->available[r] -= allocated[p][r];
+        // }
+		// fprintf(stdout,"%d = %d, ", r, resource->available[r]);
+    // }
+	// fprintf(stdout,"\n");
+	
+	// if(processToRunId == -1){
+		// processId = firstInQueue(20, 18, resource->blocked, 0);//(int r, int p, int blocked[20][18], int resType)
+		// fprintf(stdout,"DEADLOCK - processId From Blocked Queue = %d, currRunCount = %d\n", processId, currRunCount);
+	// }else{
+		// processId = processToRunId;
+		// fprintf(stdout,"DEADLOCK FUNC - processId requesting = %d, currRunCount = %d\n", processId, currRunCount);
+d572 23
+d596 4
+a599 2
+	processId = processToRunId;
+	while(currRunCount != 0){//While queue not empty
+d601 5
+a605 1
+		for(p = 0; p < currRunCount; p++){
+d617 1
+a617 2
+						break;
+						// return -1;
+d621 12
+d634 1
+a634 1
+				fprintf(stdout,"Process %d able to run!\n", p);
+d636 1
+a636 19
+				currRunCount--;
+				int numResClasses = 0;
+				int resWanted[20];//Array will hold all res classes this process currently wanting
+				for(r = 0; r < 20; r++){
+					resWanted[r] = -1;
+				}
+				fprintf(stdout,"START ALLOCATING to %d: \n", p);
+				for(r = 0; r < 20; r++){//available
+					if(processBlock->need[p][r] != 0){
+						// fprintf(stdout,"processBlock->need[%d][%d] = %d\n", p, r, processBlock->need[p][r]);
+						resWanted[numResClasses] = r;
+						numResClasses++;
+					}
+				}
+				// fprintf(stdout,"processBlock->need[%d][%d] = %d\n", p, 19, processBlock->need[p][19]);
+				// if(processBlock->need[p][19] != 0){
+					// numResClasses++;
+				// }
+				// int numResClasses = countArray(resWanted);//Count num resources giving
+d639 4
+a642 3
+				int resourceIndex = rand() % numResClasses;//Pick a random resource to allocate
+				fprintf(stdout,"resourceIndex = %d\n", resourceIndex);
+				resourceGiving = resWanted[resourceIndex];//Pick a random resource to allocate
+d644 15
+a658 3
+				resAmountGiving = rand() % processBlock->need[p][resourceGiving] + 1;//Allocate a random amount
+				// fprintf(stdout,"resAmountGiving  rand() mod %d = %d\n", processBlock->need[p][r], resAmountGiving);
+				fprintf(stdout,"%d numResClasses = %d, Giving %d of res %d\n", p, numResClasses, resAmountGiving, resourceGiving);
+d660 1
+d664 1
+a664 2
+				processBlock->need[p][resourceGiving] = processBlock->maxClaim[p][resourceGiving] - processBlock->allocated[p][resourceGiving];//Need = Max - Allocated
+				fprintf(stdout,"END ALLOCATING to %d:\n", p);
+d666 1
+d670 3
+a672 2
+				printf("The processes are in unsafe state.\n");
+				break;
+d684 3
+a686 2
+		}//END for loop
+	}//END while loop
+d690 1
+a690 1
+	fprintf(stdout,"LEAVE deadlock alg\n");
+a763 1
+	// for(x = 0; blocked[resType][x] != -1; x++){
+d770 1
+a770 1
+	return 1;//Is 0, empty
+d783 1
+d786 2
+d789 1
+d794 1
+d796 1
+a796 1
+		// printQueue(20, 18, blocked);
+d972 6
+a977 2
+ *$Date: 2016/04/02 03:56:43 $
+ *$Log: oss.c,v $
+d992 1
+a992 1
+ */@
+
+
+1.5
+log
+@Made a queue for blocked processes waiting for resources.
+Implementing deadlock algorithm.
+@
+text
+@d106 4
+a109 4
+		resource->allocated[b][a] = 0;//Amount of resource a process b is allocated
+		resource->need[b][a] = 0;//Amount of resource a process b is wanting so can run
+		resource->release[b][a] = 0;//Amount of resource a process b has released
+		// fprintf(stdout,"Process %d allocated %d, needing %d of type %d \n",b, resource->allocated[b][a], resource->need[b][a], resource->release[b][a], a);
+d119 11
+d131 1
+a131 1
+	resource->blocked[a] = -1;
+a132 2
+resource->blockedTail = -1;
+fprintf(stdout,"\n");
+d209 1
+a209 1
+numAllowed = 1;
+d224 1
+d262 1
+a262 1
+	
+d269 5
+d275 4
+a278 7
+	// fprintf(stdout,"OSS Process requesting %d\n",processBlock->processRequesting);
+	if(processBlock->processRequesting != -1){//Add process to blocked queue when requesting resources
+		// fprintf(stdout,"OSS Process requesting %d\n",processBlock->processRequesting);
+		if(!inQueue(resource->blocked, processBlock->processRequesting)){//If process not already in queue for requesting resources
+			addQueue(processBlock->processRequesting, resource->blocked, &resource->blockedTail);
+			printQueue(resource->blocked);
+		}
+d280 1
+a280 14
+	}
+	
+	// while(queueEmpty(resource->blocked) != 0 && deadlock(processBlock, resource) == 2){//If processes in blocked queue && at least 1 can run
+	if(queueEmpty(resource->blocked) != 0){//If processes in blocked queue waiting for resources
+		processToRunId = deadlock(processBlock, resource);
+		// processToRunId = processBlock->processRequesting;
+		fprintf(stdout,"Deadlock algorithm processToRunId %d\n", processToRunId);
+		// if(processToRunId != -1){//If is safe to allocate resources
+			// printQueue(resource->blocked);
+			// processBlock->processRequesting = -1;//Allow another process to be added, this is condition for process semaphore
+			processToRunId = -1;
+		// }else{//If not safe to run anything
+			
+		// }
+d515 1
+a515 1
+int deadlock(struct PCB* processBlock, struct resourceTable* resource){
+d517 11
+a527 7
+	int a, b;//for loop vars
+	for(a = 0; a < 18; a++){
+		// fprintf(stdout,"totalSystemTime[%d] = %.9f\n", a, processBlock->totalSystemTime[a]);
+	}
+	for(a = 0; a < 20; a++){
+		// fprintf(stdout,"resource->total[%d] = %d\n", a, resource->total[a]);
+	}
+d530 2
+a531 2
+	// for (a = 0; a < 20; a++) {
+		// for (b = 0; b < 18; b++) {
+d533 1
+a533 1
+			// resource->available[a] -= allocated[b][a];
+d535 1
+a535 1
+		// fprintf(stdout,"%d = %d, ", a, resource->available[a]);
+d539 27
+a565 11
+	for(b = 0; b < 2; b++){
+	// while(queueEmpty(resource->blocked) != 0){//While queue not empty
+		b = firstInQueue(resource->blocked, &resource->blockedTail);//Get first process waiting for resources
+		// for(b = 0; resource->blocked[b] != -1; b++){//Do for each resource in queue waiting for resources
+			int safe = 1;
+			for(a = 0; a < 20; a++){
+				if(resource->available[a] < resource->need[b][a]){//Not enough resources available for this process
+					fprintf(stdout,"Not enough resources for %d to run\n", resource->blocked[b]);
+					safe = 0;
+					break;
+					// return -1;
+d568 2
+a569 4
+			if(safe){
+				int processId = selectFromQueue(resource->blocked, &resource->blockedTail, resource->blocked[b]);//Remove from Queue, no longer requesting
+				printQueue(resource->blocked);
+				fprintf(stdout,"Process %d able to run and removed from queue!\n", processId);
+d571 13
+a583 6
+				fprintf(stdout,"START ALLOCATING to %d:\n", processId);
+				for(a = 0; a < 20; a++){//available
+					fprintf(stdout,"%d total = %d, allocated = %d, need = %d\n", a, resource->total[a], resource->allocated[b][a], resource->need[b][a]);
+					resource->allocated[b][a] = resource->allocated[b][a] + resource->need[b][a];//Allocate resources for this process
+					resource->total[a] -= resource->need[b][a];//Update total number of resources
+					resource->need[b][a] = processBlock->maxClaim[processId][a] - resource->allocated[processId][a];//Need = Max - Allocated
+d585 17
+a601 3
+				fprintf(stdout,"END ALLOCATING to %d:\n", processId);
+				for(a = 0; a < 20; a++){
+					fprintf(stdout,"%d total = %d, allocated = %d, need = %d\n", a, resource->total[a], resource->allocated[b][a], resource->need[b][a]);
+d603 3
+a605 1
+				return processId;
+d607 17
+a623 3
+		// }
+	}
+	
+d627 16
+a642 4
+	
+	// return 1;
+	return -1;//No process in safe state
+	// fprintf(stdout,"Leave deadlock alg\n");
+d645 4
+a648 2
+int addQueue(int i, int theQueue[], int *tail){
+	fprintf(stdout,"Add to queue: %d\n",i);
+d650 1
+a650 1
+		fprintf(stdout,"%d QUEUE IS FULL\n",i);
+d654 2
+a655 2
+	theQueue[*tail % MAX_SIZE] = i;// Add the item to the Queue
+	fprintf(stdout,"theQueue[%d] = %d = %d, tail = %d \n",*tail % MAX_SIZE, i,theQueue[*tail % MAX_SIZE], *tail);
+d659 48
+a706 4
+int firstInQueue(int theQueue[],  int *tail){
+	if(*tail == -1){// Check for empty Queue
+		fprintf(stderr,"POP QUEUE IS EMPTY \n");
+		return -1;  // Return null character if queue is empty
+d708 6
+a713 2
+	// fprintf(stdout,"POP theQueue[0] = %d, tail = %d\n",theQueue[0],*tail);
+	int processId = theQueue[0];	// Get character to return
+d715 1
+d721 2
+a722 1
+int selectFromQueue(int theQueue[], int *tail, int processId){
+d729 1
+a729 1
+		printQueue(theQueue);
+d731 2
+a732 2
+		while(theQueue[i] != processId){//Find element in queue
+			fprintf(stdout,"Id search theQueue[%d] = %d != %d\n",i, theQueue[i], processId);
+d735 3
+a737 3
+		fprintf(stdout,"Id Found theQueue[%d] = %d\n",i, theQueue[i]);
+		processId = theQueue[i];// Get Id to return
+		theQueue[i] = -1;
+d739 3
+a741 3
+		while(theQueue[i + 1] != -1){//Move elements forward in the queue
+			fprintf(stdout,"Shift theQueue[%d] = %d\n",i , theQueue[i + 1]);
+			theQueue[i] = theQueue[i + 1];
+d744 2
+a745 2
+		// fprintf(stdout,"theQueue[%d] = 0\n",i);
+		theQueue[i] = -1;//Set last spot that was filled to 0 since process moved up in queue
+d751 1
+a751 26
+int inQueue(int *theQueue, int processId){
+	int i;
+	for(i = 0; theQueue[i] != -1; i++){//Move elements forward in the queue
+		if(theQueue[i] == processId){
+			// fprintf(stdout,"Process %d ALREADY in quueue\n",processId);
+			return 1;//Process already in queue
+		}
+	}
+	// fprintf(stdout,"Process %d NOT in quueue\n",processId);
+	return 0;//Process not in queue
+}
+
+void printQueue(int *theQueue){
+	fprintf(stdout,"Blocked Queue: ");
+
+	int x;
+	fprintf(stdout,"[");
+	for(x = 0; theQueue[x] != -1; x++){
+	// for(x = 0; x < 17; x++){
+		fprintf(stdout,"%d ",theQueue[x]);
+	}
+	fprintf(stdout,"]\n");
+	return;
+}
+
+int queueEmpty(int *theQueue){
+d753 1
+a753 1
+	for(x = 0; theQueue[x] != -1; x++){
+d755 5
+d761 1
+a761 4
+	// if(theQueue[0] == -1){
+		// return n;
+	// }
+	// fprintf(stdout,"Not empty\n");
+a767 2
+	// int randTime = rand() % 999999 + 1;//simulate overhead activity for each iteration by 0.1s or 1ms
+	// int randTime = rand() % 99999 + 1;//simulate overhead activity for each iteration by 0.01s
+a779 1
+// double getTotalTime(int *clockSecs, int *clockNanos){
+@
+
+
+1.4
+log
+@Starting to try making oss communicate with processes on resource needs.
+To do: Bankers algorithm, statistics, test with more processes
+@
+text
+@d3 3
+a5 1
+int semKey = 8675309, semId;
+d18 1
+a18 1
+double runTime = 20;//Time the program can run until in stops (seconds)
+d21 1
+a21 1
+int processId = 1, processToRunId;
+d76 1
+a76 1
+	fprintf(stderr,"%s",__FILE__);
+d81 6
+d113 1
+a113 1
+//15-25% of these 20 resources will be shared.  That's 3-5 of them.
+d118 7
+d194 1
+a194 1
+processBlock->processScheduled = 0;
+d196 1
+d198 3
+a200 1
+// fprintf(stdout,"HERE\n");
+d259 10
+a268 7
+	// if(!blockedEmpty()){//If processes in blocked queue waiting for resources
+	// while(!blockedEmpty()){//If processes in blocked queue waiting for resources
+		// int nextProcess = getNextProcess();//Get next process in line in queue
+		// deadlock(nextProcess, processBlock , resource);
+		// deadlock(processBlock , resource);
+		// deadlock(processBlock);
+	// }
+d270 12
+a281 4
+	if(totalTime > 2){
+		fprintf(stdout,"Time > 2, check deadlock\n");
+		// deadlock(processBlock);
+		deadlock(*processBlock);
+a283 1
+	
+d287 7
+a293 2
+	if(totalTime > runTime && bvEmpty(bv, numAllowed) == 1){//If time is up and bitVector/Process table empty
+	// if(totalTime > runTime){//If time is up and bitVector/Process table empty
+d347 2
+a348 1
+	printf("Master ID %d\n",getpid());
+d357 10
+a366 10
+		fprintf(stdout,"Time is up, but children remain and must be eradicated...\n");
+		fprintf(stdout,"     _.--''--._\n");
+		fprintf(stdout,"    /  _    _  \\ \n");
+		fprintf(stdout," _  ( (_\\  /_) )  _\n");
+		fprintf(stdout,"{ \\._\\   /\\   /_./ }\n");
+		fprintf(stdout,"/_'=-.}______{.-='_\\ \n");
+		fprintf(stdout," _  _.=('''')=._  _\n");
+		fprintf(stdout,"(_''_.-'`~~`'-._''_)\n");
+		fprintf(stdout," {_'            '_}\n");
+		fprintf(stderr,"     ");
+d409 1
+a409 1
+if(semctl(semId, 0, IPC_RMID) == -1){
+d414 5
+a418 6
+//Delete condition Semaphore.
+// if(semctl(semIdCond, 0, IPC_RMID) == -1){
+    // fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+	// perror("semctl");
+	// exit(EXIT_FAILURE);
+// }
+d451 1
+a451 1
+			//Detach from shared mem
+a456 1
+			//Remove shared mem when all processes done
+a461 1
+			//Detach from shared mem
+a466 1
+			//Remove shared mem when all processes done
+a471 1
+			//Detach from shared mem
+a476 1
+			//Remove shared mem when all processes done
+d490 5
+a494 12
+			//Delete Monitor condition Semaphore.
+			// if(semctl(semIdCond, 0, IPC_RMID) == -1){
+				// fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				// perror("semctl");
+				// exit(EXIT_FAILURE);
+			// }
+			//Delete condition Semaphore.
+			// if(semctl(semIdCond2, 0, IPC_RMID) == -1){
+				// fprintf(stderr,"%s Line %d ",__FILE__,__LINE__);
+				// perror("semctl");
+				// exit(EXIT_FAILURE);
+			// }
+d516 3
+a518 3
+int deadlock(struct PCB* processBlock){
+	fprintf(stdout,"In deadlock alg\n");
+	int a;
+d520 1
+a520 1
+		fprintf(stdout,"totalSystemTime[%d] = %d\n", a, processBlock->totalSystemTime[a]);
+d522 146
+a667 1
+	fprintf(stdout,"Leave deadlock alg\n");
+d734 2
+a735 1
+	for(i = 1; i <= numProcesses; i++){
+d786 20
+d813 15
+a827 11
+ *$Date: 2016/04/01 03:06:53 $
+ *$Log: oss.c,v $
+ *Revision 1.3  2016/04/01 03:06:53  o2-gray
+ *All resource values are initialized and starting to exec to child processes
+ *Signaling created and handled
+ *
+ *Revision 1.2  2016/03/31 03:36:27  o2-gray
+ *Changed how I'm doing my resource struct so made sure everything initializing correctly.
+ *
+ *Revision 1.1  2016/03/30 04:00:10  o2-gray
+ *Initial revision
+@
+
+
+1.3
+log
+@All resource values are initialized and starting to exec to child processes
+Signaling created and handled
+@
+text
+@d15 1
+a15 1
+int numAllowed = 4;//Number of processes allowing to be created
+d98 4
+a101 3
+		resource->allocatedTo[a][b] = 0;//Amount of resource b process a is allocated
+		resource->request[a][b] = 0;//Amount of resource b process a is wanting so can run
+		// fprintf(stdout,"Process %d allocated %d, requesting %d of type %d \n",b, resource->allocatedTo[b], resource->request[b], a);
+d104 1
+a104 1
+
+a106 1
+fprintf(stdout, "amountShared %d\n",amountShared);
+a166 1
+	fprintf(stdout,"\n",a,resource->total[a]);
+d168 8
+d180 1
+d214 1
+a214 1
+			fprintf(stdout,"New child %d / %d, time: %.9f\n",processId, getpid(),prevTotalTime);
+d216 1
+a216 1
+			// randBurst = rand() % 72500000 + 1;//0-72.5 millisecs
+a222 1
+			// execl("./process",tempProcessId,tempShmidVal,tempShmidVal2,NULL);//Execute executible
+d224 1
+a224 2
+			// perror("Child failed to execl ");
+			fprintf(stdout,"Child exec: %d - %d",processId, getpid());
+d235 20
+a254 1
+	// clearBit(bv, processToRunId);//Process done, remove from bitVector
+d259 4
+a262 3
+	// if(totalTime > runTime && bvEmpty(bv, numAllowed) == 1){//If time is up and bitVector/Process table empty
+	if(totalTime > runTime){//If time is up and bitVector/Process table empty
+		fprintf(stdout,"Time is up!\n");
+d495 9
+d507 4
+a510 3
+	// int randTime = rand() % 99999 + 1;//simulate overhead activity for each iteration by 0.01ms
+	int randTime = rand() % 9999 + 1;//simulate overhead activity for each iteration by 0.001ms
+	// int randTime = rand() % 999 + 1;//simulate overhead activity for each iteration by 0.0001ms
+a516 1
+	// *clockSecs = *clockSecs + 1;
+d619 1
+a619 1
+double genRandomDouble(){//72500000 is 72.5 millisecs
+d622 1
+a622 1
+	return ((double)rand() * ( 0.5 - 0 ) ) / (double)RAND_MAX + 0;
+d626 1
+a626 1
+ *$Date: 2016/03/31 03:36:27 $
+d628 4
+@
+
+
+1.2
+log
+@Changed how I'm doing my resource struct so made sure everything initializing correctly.
+@
+text
+@d16 2
+a17 1
+double runTime = 30;//Time the program can run until in stops (seconds)
+d25 1
+d30 1
+d36 1
+a36 2
+struct resourceTable *resource;//Array of structs for each resource
+
+d78 1
+a78 1
+semctl(semId, 0, SETVAL, 0);//Initialize binary semaphore, locked from start
+d89 3
+a91 3
+//Initialize resources' values
+// int tempArray[18] = {0};//To initialize the queues arrays
+int a, b;
+a92 1
+	// resource[a] = (struct resourceTable*) malloc(sizeof(struct resourceTable)); 
+d96 1
+a96 2
+	fprintf(stdout,"type: %d, total: %d, available: %d\n",resource->type[a], resource->total[a], resource->available[a]);
+	// fprintf(stdout,"HERE\n");
+a97 2
+		// memcpy(resource[a]->allocatedTo[b], tempArray, sizeof(resource[a]->allocatedTo[b]));//Set all spaces to 0
+		// memcpy(resource[a]->request[b], tempArray, sizeof(resource[a]->request[b]));//Set all spaces to 0
+d100 1
+a100 1
+		fprintf(stdout,"Process %d allocated %d, requesting %d of type %d \n",b, resource->allocatedTo[b], resource->request[b], a);
+d103 1
+d105 57
+d163 5
+a167 1
+	// bool resource[a]->shared;
+a171 2
+// int tempArray[18] = {0};//To initialize the queues arrays
+// memcpy(scheduler->lowQ, tempArray, sizeof(scheduler->lowQ));//Set all spaces to 0
+d174 66
+d241 69
+a309 9
+
+//Free resource memory
+// for(a = 0; a < 20; a++){
+	// for(b = 0; b < 18; b++){
+		// free(resource[b][0]);
+	// }
+	// free(resource[a]);
+// }
+// fprintf(stdout,"DONE with Free\n");
+d366 1
+a366 1
+	// printf("MASTER process id %d  signal %d\n", getpid(),mysignal);
+d369 1
+a369 1
+	struct resourceTable *resource[20];
+d382 1
+a382 1
+	if((*resource = (struct resourceTable *)shmat(shmidVal3, 0, 0)) == (void *)-1){ //Returns void*
+d391 1
+a391 1
+			kill(-getpid(),SIGTERM);
+d473 2
+a474 1
+	int randTime = rand() % 999 + 1;//simulate overhead activity for each iteration by 0.0001ms
+d494 70
+a589 6
+void createSharedMem(){
+// void createSharedMem(struct PCB* processBlock, struct timing* timer, struct resourceTable *resource[20]){
+// void createSharedMem(struct PCB* processBlock, struct timing* timer, struct resourceTable resource){
+
+}
+
+d591 1
+a591 1
+ *$Date: 2016/03/30 04:00:10 $
+d593 3
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d33 1
+a33 1
+struct resourceTable *resource[20];//Array of structs for each resource
+d64 1
+a64 1
+if((*resource = (struct resourceTable*)shmat(shmidVal3, 0, 0)) == (void *)-1){ //Returns void*
+d88 1
+a88 1
+int tempArray[18] = {0};//To initialize the queues arrays
+d91 5
+a95 5
+	resource[a] = (struct resourceTable*) malloc(sizeof(struct resourceTable)); 
+	resource[a]->type = a;//The total amount of this resource
+	resource[a]->total = rand() % 10 + 1;//The total amount of this resource [1-10]
+	resource[a]->available = resource[a]->total;//The total amount available of this resource
+	// fprintf(stdout,"type: %d, total: %d, available: %d\n",resource[a]->type, resource[a]->total, resource[a]->available);
+d98 5
+a102 5
+		memcpy(resource[a]->allocatedTo[b], tempArray, sizeof(resource[a]->allocatedTo[b]));//Set all spaces to 0
+		memcpy(resource[a]->request[b], tempArray, sizeof(resource[a]->request[b]));//Set all spaces to 0
+		// resource[a]->allocatedTo[b] = 0;//Amount of resource a process b is allocated
+		// resource[a]->request[b] = 0;//Amount of resource a process b is wanting so can run
+		// fprintf(stdout,"Process %d allocated %d of type %d \n",b, resource[a]->allocatedTo[b], a);
+d119 1
+a119 1
+for(a = 0; a < 20; a++){
+d123 3
+a125 3
+	free(resource[a]);
+}
+fprintf(stdout,"DONE with Free\n");
+d341 6
+a346 3
+/*$Author$
+ *$Date$
+ *$Log$
+@

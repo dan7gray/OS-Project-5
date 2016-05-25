@@ -1,0 +1,31 @@
+Dan Gray
+Mark Hauschild
+OS - Project 5 - Resource Management
+
+This program (oss) creates processes and allocates/deallocates resources to them, blocks them if necessary, and removes them when they're done.
+Oss may allocate a random amount of a random resource (that they need) to a process when they put in a request for resources.  When the request
+is made, oss runs Deadlock Avoidance algorithm to make sure there are enough resources to satisfy the requesting process' Max Claims.
+If there aren't enough resources available to satisfy that process' Max Claim for a resource oss will put that process into
+that resources blocked queue until the right amount of resources becomes available to safely allocate a number of resources to that process.
+The processes may also deallocate a random resource that they already have. The processes my also terminate at a random time.
+When this happens, it lets oss know so that it may remove it from the Process Table (bit vector).  When oss does this it will wait on that
+process' process Id then decrement the process counter that keeps track of the number of processes currently running.  When the counter
+is decremented it may allow another process to be created and execute.
+
+
+Commands to run program:
+        1) make oss
+        2) make process
+        3) oss (this executes the program)
+
+Variables that may be safely changed to modify how program runs:
+(getopt wasn't a requirement, so not putting time into doing something not necessary)
+	int numAllowedConcurrently = 5;//Number of processes allowed to run at the same time
+	int totalNumAllowed = 15;//Number of processes allowing to be created
+	double runTime = 10;//Time the program can run until in stops (seconds)
+
+Things Noticed:
+When there are more processes running *Concurrently*, all of the statistic times tend to increase.  
+This also increases the chance of deadlock and being blocked because of insufficient resources.
+We can allow it to create many processes over it's lifetime, but the amount running concurrently
+is what can really change things.

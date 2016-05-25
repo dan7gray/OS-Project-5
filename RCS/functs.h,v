@@ -1,0 +1,246 @@
+head	1.3;
+access;
+symbols;
+locks
+	o2-gray:1.3; strict;
+comment	@ * @;
+
+
+1.3
+date	2016.04.06.03.19.31;	author o2-gray;	state Exp;
+branches;
+next	1.2;
+
+1.2
+date	2016.03.31.03.37.20;	author o2-gray;	state Exp;
+branches;
+next	1.1;
+
+1.1
+date	2016.03.30.04.03.19;	author o2-gray;	state Exp;
+branches;
+next	;
+
+
+desc
+@PCB, timing, semaphore, clock, shared memory set up
+@
+
+
+1.3
+log
+@Moved some vars to proceesBlock
+@
+text
+@#ifndef FUNCTS_H
+#define FUNCTS_H
+
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/shm.h>//Shared Mem
+#include <sys/ipc.h>
+#include <sys/wait.h>//wait()
+#include <signal.h>
+#include <unistd.h> //fork()
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <string.h>
+#include <sys/sem.h>
+#include <stdbool.h>
+
+#define MAX_SIZE 18
+
+struct PCB{//In shared mem
+	int resOwned[18][20];//How many resources this process has
+	int maxClaim[18][20];//Process's maximum claim on resources
+	int allocated[18][20];//18 processes, each could have any of 20 resources
+	int need[18][20];//18 processes, each could request any of 20 resources
+	int release[18][20];//Resources released by each process
+	int running[18];
+	double cpuTimeUsed[18];//total CPU time used
+	double totalSystemTime[18];//total time in the system, 
+	int processCanRun;
+	int processDone;
+	int processRequesting;
+};
+
+struct timing{//In shared mem
+	//1 sec = 1000 milli = 1000000 micro = 1000000000 nano
+	unsigned int clockSecs; 
+	unsigned int clockNanos;
+};
+
+//descriptor id (or class id), number of units (total), number of units (available), and number of units (allocated). 
+struct resourceTable{//20 resources
+	int type[20];
+	int total[20];
+	int available[20];
+	bool shared[20];
+	// int allocated[18][20];//18 processes, each could have any of 20 resources
+	// int need[18][20];//18 processes, each could request any of 20 resources
+	// int release[18][20];//Resources released by each process
+	int blocked[20][18];//Queue of processes requesting resources
+	int blockedTail[20];
+};
+/*
+// int deadlock(struct PCB*, struct resourceTable*);
+int deadlock(struct PCB*, struct resourceTable*, int processToRunId);
+// int addQueue(int processId, int theQueue[], int *tail);
+// int addQueue(int processId, int resType, int blocked[], int *tail);
+int addQueue(int processId, int resType, int blocked[20][18], int *tail);
+void printQueue(int r, int p, int blocked[20][18]);
+// void printQueue(int theQueue[]);
+int inQueue(int *blocked, int processId);
+int queueEmpty(int *blocked);
+int selectFromQueue(int blocked[], int *tail, int processId);
+int firstInQueue(int blocked[], int *tail);
+// int selectFromQueue(int theQueue[], int *tail, int *processId);
+*/
+int deadlock(struct PCB*, struct resourceTable*, int processToRunId);
+int addQueue(int processId, int resType, int blocked[20][18], int *tail);
+void printQueue(int r, int p, int blocked[r][p]);
+int inQueue(int r, int p, int blocked[r][p], int resType, int processId);
+int queueEmpty(int r, int p, int blocked[r][p], int resType);
+int allQueuesEmpty(int r, int p, int blocked[r][p]);
+int firstInQueue(int r, int p, int blocked[r][p], int resType);
+int selectFromQueue(int blocked[], int *tail, int processId);
+int countArray(int running[]);
+// void printResources(struct resourceTable* resource, int processId);
+void printResources(struct PCB* processBlock, struct resourceTable* resource, int processId);
+// int selectFromQueue(int r, int p, int blocked[r][p], int resType, int *tail, int processId);
+
+//Timing:
+void advanceClock(int *clockSecs, int *clockNanos);
+double getTotalTime(int *clockSecs, int *clockNanos, double *time);
+double genRandomDouble();//For comparing to time when creating processes
+
+//Bit Vector
+void set(int bv[], int i);//Set value in bitVector
+int member(int bv[], int i);//Check if value in bitVector
+void clearBit(int bv[], int i);//Clear the process from the process table
+int bvFull(int bv[], int numProcesses);//Check if process table full
+int bvEmpty(int bv[], int numProcesses);//Check if process table empty
+
+//Shared Memory:
+extern int shmidVal;
+extern int shmidVal2;
+extern int shmidVal3;
+extern key_t key; //For shared memory
+extern key_t key2; //For shared memory
+extern key_t key3; //For shared memory
+
+//Signaling:
+void sigHandler(int mysignal);
+void initSigHandler();
+
+//Semaphores:
+extern int semKey, semId;//for waitClock(), signalClock()
+extern int semKey2, semId2;//For processes requesting resources
+extern int semKeyCond, semIdCond;
+struct sembuf operation;
+struct sembuf operation2;
+struct sembuf condition;
+void waitClock();
+void signalClock();
+void waitRequest();//For when processes requesting resources
+void signalRequest(int processRequesting);
+void waitSem();
+void signalSem();
+
+
+#endif
+/*$Author: o2-gray $
+ *$Date: 2016/03/31 03:37:20 $
+ *$Log: functs.h,v $
+ *Revision 1.2  2016/03/31 03:37:20  o2-gray
+ *Changed resource struct to have 2d arrays rather than making an array of structs.
+ *
+ *Revision 1.1  2016/03/30 04:03:19  o2-gray
+ *Initial revision
+ *
+ */
+@
+
+
+1.2
+log
+@Changed resource struct to have 2d arrays rather than making an array of structs.
+@
+text
+@d23 6
+a28 2
+	int resOwned[18];//How many resources this process has
+	int maxClaim[18];//Process's maximum claim on resources
+d31 3
+a33 4
+	
+	int totalResAlloc;//Total resources currently allocated
+	
+	int processScheduled;
+a39 2
+	// int running[18];
+	// int blocked[18];
+d48 5
+a52 8
+	int allocatedTo[18][20];//18 processes, each could have any of 20 resources
+	int request[18][20];//18 processes, each could request any of 20 resources
+	// int type;
+	// int total;
+	// int available;
+	// int allocatedTo[18];
+	// int request[18];
+	// bool shared;
+d54 26
+d86 7
+a99 3
+void createSharedMem();
+void removeSharedMem();
+// void createSharedMem(struct PCB*, struct timing*, struct resourceTable *resource[20]);
+d106 2
+a107 2
+extern int semKey, semId;
+extern int semKey2, semId2;
+a108 1
+struct sembuf condition;
+d111 1
+a111 2
+// void waitSem();
+// void signalSem();
+d114 4
+a117 2
+// void waitCond();
+// void signalCond();
+d122 1
+a122 1
+ *$Date: 2016/03/30 04:03:19 $
+d124 3
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d42 13
+a54 11
+struct resourceTable{
+	// int rClass[20];
+	// int rTotal[20];
+	// int rAvailable[20];
+	// bool shared[20];
+	int type;
+	int total;
+	int available;
+	int allocatedTo[18];
+	int request[18];
+	bool shared;
+d93 6
+a98 3
+/*$Author$
+ *$Date$
+ *$Log$
+@
